@@ -25,84 +25,89 @@ r.sadd("tags", "rust", "cache", "redis")
 
 ## Benchmarks
 
-All benchmarks using `valkey-benchmark`, 100k operations (10k for LRANGE), 10 parallel clients. Redis 7.2.7 on both platforms.
+All benchmarks using `valkey-benchmark`, 100k operations (10k for LRANGE), 10 parallel clients, Redis 7.2.7.
 
 - **Mac**: Apple M4 Pro, macOS
-- **Linux**: Intel Xeon Platinum 8175M (8 cores / 16 threads), Amazon Linux 2
+- **Linux**: Intel Xeon Platinum 8175M (8c/16t @ 2.50GHz), Amazon Linux 2
 
 ### Linux — Simple commands (ops/sec)
 
-| Command | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
-|---------|-----------------|-----------------|-------------|
-| SET     | **85,763**      | 36,337          | 90,992      |
-| GET     | **83,472**      | 37,313          | 90,992      |
-| INCR    | **84,818**      | 37,175          | 92,507      |
-| LPUSH   | **82,850**      | 35,855          | 92,678      |
-| HSET    | **85,690**      | 34,305          | 90,090      |
+| Command | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 | Rust vs Redis |
+|---------|-----------------|-----------------|-------------|---------------|
+| SET     | **86,730**      | 36,337          | 90,992      | 95%           |
+| GET     | **86,356**      | 37,313          | 92,851      | 93%           |
+| INCR    | **87,873**      | 37,175          | 91,241      | 96%           |
+| LPUSH   | **84,531**      | 35,855          | 89,767      | 94%           |
+| HSET    | **86,655**      | 34,305          | 92,081      | 94%           |
 
 ### Linux — LRANGE (ops/sec)
 
-| Elements | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
-|----------|-----------------|-----------------|-------------|
-| 100      | **46,948**      | 11,351          | 51,020      |
-| 300      | **21,008**      | 5,061           | 21,186      |
-| 500      | **13,928**      | 3,252           | 14,556      |
-| 600      | **12,392**      | 2,761           | 12,438      |
+| Elements | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 | Rust vs Redis |
+|----------|-----------------|-----------------|-------------|---------------|
+| 100      | **47,847**      | 11,351          | 50,251      | 95%           |
+| 300      | **20,964**      | 5,061           | 20,964      | **100%**      |
+| 500      | **14,493**      | 3,252           | 14,451      | **100%**      |
+| 600      | **12,438**      | 2,761           | 12,376      | **100%**      |
 
 ### macOS — Simple commands (ops/sec)
 
 | Command | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
 |---------|-----------------|-----------------|-------------|
-| SET     | **74,460**      | 55,463          | 5,336       |
-| GET     | **78,802**      | 58,343          | 5,772       |
-| INCR    | **78,555**      | 59,524          | 4,164       |
-| LPUSH   | **72,622**      | 53,850          | 3,510       |
-| HSET    | **71,891**      | 56,180          | 2,285       |
+| SET     | **81,566**      | 55,463          | 5,336       |
+| GET     | **83,472**      | 58,343          | 5,772       |
+| INCR    | **85,179**      | 59,524          | 4,164       |
+| LPUSH   | **85,251**      | 53,850          | 3,510       |
+| HSET    | **85,397**      | 56,180          | 2,285       |
 
 ### macOS — LRANGE (ops/sec)
 
 | Elements | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
 |----------|-----------------|-----------------|-------------|
-| 100      | **57,803**      | 24,331          | 4,399       |
-| 300      | **40,000**      | 12,107          | 2,503       |
-| 500      | **33,333**      | 8,467           | 3,678       |
-| 600      | **28,736**      | 7,435           | 4,861       |
+| 100      | **69,444**      | 24,331          | 4,399       |
+| 300      | **45,872**      | 12,107          | 2,503       |
+| 500      | **35,336**      | 8,467           | 3,678       |
+| 600      | **31,056**      | 7,435           | 4,861       |
 
 ### Analysis
 
-**Linux is the only honest comparison.** Redis is optimised for Linux `epoll` — on macOS it falls back to `kqueue` and performs 10–20× worse. The macOS numbers are included for completeness but should not be used to claim InCache "beats" Redis.
+**On Linux, InCacheV2 matches Redis on LRANGE and reaches 93–96% on simple commands.**
 
-**On Linux, InCacheV2 reaches ~93% of Redis throughput:**
+| Metric | InCacheV2 | Redis 7.2.7 |
+|---|---|---|
+| Avg simple commands | ~86,400 | ~91,400 |
+| LRANGE 300 | 20,964 | 20,964 |
+| LRANGE 500 | 14,493 | 14,451 |
+| LRANGE 600 | 12,438 | 12,376 |
 
-| | InCacheV2 (Rust) | Redis 7.2.7 | Ratio |
-|---|---|---|---|
-| Avg simple commands | ~84,500 | ~91,400 | 92% |
-| LRANGE 100 | 46,948 | 51,020 | 92% |
-| LRANGE 600 | 12,392 | 12,438 | **99.6%** |
+The remaining ~5% gap on simple commands is Redis's hand-tuned `ae` event loop vs Tokio's general-purpose reactor. On LRANGE, Rust's `VecDeque` iterator matches Redis's linked-list traversal exactly.
 
-**Rust vs Python — Linux:**
+**Rust vs Python on Linux:**
 
 | | Rust | Python | Speedup |
 |---|---|---|---|
-| Simple commands | ~84,500 | ~36,200 | **2.3×** |
-| LRANGE 100 | 46,948 | 11,351 | **4.1×** |
-| LRANGE 600 | 12,392 | 2,761 | **4.5×** |
+| Simple commands | ~86,400 | ~36,200 | **2.4×** |
+| LRANGE 100 | 47,847 | 11,351 | **4.2×** |
+| LRANGE 600 | 12,438 | 2,761 | **4.5×** |
 
-The Rust advantage is much larger on Linux than macOS because Python's `asyncio` happens to handle macOS `kqueue` efficiently, masking the interpreter overhead. On Linux with `epoll`, the raw per-command cost dominates — and Rust's zero-overhead abstractions shine.
+**Why does Redis perform poorly on macOS?**
 
-### Optimisations in V2
+Redis is optimised for Linux `epoll`. On macOS it falls back to `kqueue` and performs 10–20× worse. Both Tokio and Python's `asyncio` handle macOS `kqueue` efficiently. The macOS numbers should not be used to claim InCache "beats" Redis.
+
+### Optimisations applied
 
 | Optimisation | Impact |
 |---|---|
-| `DashMap` (lock-free concurrent hashmap) | Per-shard locking instead of single `Mutex` |
+| Single-threaded Tokio runtime | Zero locking — `Rc<RefCell<Store>>` like Redis's single-threaded model |
+| `mimalloc` global allocator | Faster small allocations than system malloc |
+| `TCP_NODELAY` | Disables Nagle's algorithm — lower latency |
 | `bytes::Bytes` (reference-counted) | Zero-copy value storage |
 | `memchr` for CRLF scanning | SIMD-accelerated RESP parsing |
 | `itoa` for integer encoding | No `format!()` allocation |
 | `encode_into(BytesMut)` | Direct write-buffer encoding |
-| `BufWriter<OwnedWriteHalf>` | Batched TCP writes |
-| Stack-based command dispatch | `match` on `&[u8]` — zero allocation |
-| `Box<str>` for hash/set keys | 1 word smaller than `String` |
-| LTO + codegen-units=1 | Whole-program optimisation |
+| 64KB `BufWriter` | Batched TCP writes, fewer syscalls |
+| `match &[u8]` command dispatch | Zero-allocation command routing |
+| `unsafe from_utf8_unchecked` | Skip UTF-8 validation on trusted RESP input |
+| Fat LTO + codegen-units=1 | Whole-program optimisation |
 
 ### Run benchmarks yourself
 
@@ -138,7 +143,7 @@ valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10
 
 - `EXPIRE`, `TTL`, `PERSIST`, `SETEX`, `SET EX/PX/NX/XX`
 - Lazy expiry — checked on every key access
-- Active expiry sweep — background Tokio task runs every 100ms
+- Active expiry sweep — background task every 100ms
 
 **Key commands** — `TYPE`, `RENAME`, `KEYS` (glob patterns), `EXISTS`, `DEL`
 
@@ -152,44 +157,39 @@ valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10
 
 ```
 src/
-├── main.rs              # CLI entrypoint (--host, --port)
-├── server.rs            # Tokio TCP server — one task per connection
-│                        #   BufWriter for batched writes
+├── main.rs              # CLI entrypoint — single-threaded Tokio runtime
+├── server.rs            # TCP server — Rc<RefCell<Store>>, spawn_local
+│                        #   TCP_NODELAY, 64KB BufWriter
 ├── protocol.rs          # RESP2 parser + serialiser
-│                        #   memchr for CRLF scanning
-│                        #   itoa for integer encoding
-│                        #   encode_into() writes directly to BytesMut
-├── store.rs             # In-memory store (DashMap — lock-free)
-│                        #   lazy expiry on every key access
-│                        #   active sweep task every 100ms
-│                        #   closure-based API to minimise lock scope
+│                        #   memchr SIMD, itoa, encode_into()
+├── store.rs             # In-memory store — plain HashMap, zero locking
+│                        #   lazy + active TTL expiry
 └── commands/
-    ├── mod.rs           # Command dispatcher — match on &[u8] slices
+    ├── mod.rs           # Dispatcher — match on &[u8] slices
     ├── strings.rs       # String + key commands
     ├── lists.rs         # List commands (VecDeque)
     ├── hashes.rs        # Hash commands (HashMap)
     ├── sets.rs          # Set commands (HashSet)
-    └── server.rs        # Server commands + HELLO handshake
+    └── server.rs        # Server commands + HELLO
 ```
 
 | Concept | InCache (Python) | InCacheV2 (Rust) |
 |---------|-----------------|-----------------|
-| Async runtime | `asyncio` | `tokio` |
-| Concurrency | `asyncio.Lock` (global) | `DashMap` (per-shard) |
+| Async runtime | `asyncio` | `tokio` (current_thread) |
+| Concurrency | `asyncio.Lock` | None — single-threaded |
+| Allocator | CPython pymalloc | `mimalloc` |
 | Value storage | Python objects | `bytes::Bytes` (zero-copy) |
-| RESP parsing | byte string slicing | `memchr` SIMD + `BytesMut` |
-| Integer encoding | `f":{n}\r\n"` | `itoa` (no allocation) |
-| TCP writes | direct `writer.write()` | `BufWriter` (batched) |
+| RESP parsing | byte slicing | `memchr` SIMD + `BytesMut` |
+| TCP writes | `writer.write()` | 64KB `BufWriter` |
 | List values | `collections.deque` | `VecDeque` |
 | Hash values | `dict` | `HashMap<Box<str>, Bytes>` |
 | Set values | `set` | `HashSet<Box<str>>` |
-| Command dispatch | `dict[name] → fn` | `match &[u8]` (zero-alloc) |
 
 ---
 
 ## Tests
 
-149 tests — the same test suite that validates [InCache](https://github.com/ImadRahhali/InCache). Written in Python against the `redis-py` client, because the tests validate RESP protocol behaviour, not implementation internals.
+149 tests — the same test suite that validates [InCache](https://github.com/ImadRahhali/InCache). Written in Python against `redis-py`, because the tests validate RESP protocol behaviour, not implementation internals.
 
 ```bash
 pip install redis pytest pytest-asyncio
@@ -197,11 +197,11 @@ pytest tests/ -v
 ```
 
 ```
-tests/test_strings.py   48 tests — SET/GET flags, TTL, INCR, APPEND, TYPE, KEYS, RENAME
-tests/test_lists.py     30 tests — push/pop, LRANGE, LINDEX, LSET, LINSERT, LREM
-tests/test_hashes.py    27 tests — HSET, HMGET, HGETALL, HINCRBY, HEXISTS
-tests/test_sets.py      31 tests — SADD, set operations, SMOVE, SPOP
-tests/test_server.py    13 tests — PING, ECHO, FLUSH, DBSIZE, SELECT, INFO
+tests/test_strings.py   48 tests
+tests/test_lists.py     30 tests
+tests/test_hashes.py    27 tests
+tests/test_sets.py      31 tests
+tests/test_server.py    13 tests
 ```
 
 ---
@@ -214,7 +214,7 @@ cargo build --release
 ./target/release/incache_v2 --port 6380         # custom port
 ```
 
-Dependencies: `tokio` · `bytes` · `dashmap` · `itoa` · `memchr`
+Dependencies: `tokio` · `bytes` · `itoa` · `memchr` · `mimalloc`
 
 ---
 
@@ -225,6 +225,7 @@ InCacheV2 is a learning project, not a production database:
 - No persistence — data is lost on restart
 - No replication, clustering, Lua scripting, sorted sets, streams, or pub/sub
 - No authentication, ACLs, or TLS
+- Single-threaded — one CPU core only
 
 For production workloads, use [Redis](https://redis.io) or [Valkey](https://valkey.io).
 
