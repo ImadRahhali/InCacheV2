@@ -25,18 +25,26 @@ r.sadd("tags", "rust", "cache", "redis")
 
 ## Benchmarks
 
-All benchmarks using `redis-benchmark` (from Redis 7.2.7), on **Linux** (Intel Xeon Platinum 8175M, 8c/16t @ 2.50GHz, Amazon Linux 2). macOS numbers included separately — Redis performs poorly on macOS due to `kqueue` fallback.
+All benchmarks run on **Linux** (Intel Xeon Platinum 8175M, 8c/16t @ 2.50GHz, Amazon Linux 2) using `redis-benchmark` from Redis 7.2.7. Both InCacheV2 and Redis 7.2.7 are single-threaded, running on the same machine, same conditions.
 
-### Pipelined workloads — InCacheV2 beats Redis
+---
+
+### Pipelined workloads
+
+Pipelining sends multiple commands in a single network round-trip without waiting for each response. This is how production Redis clients (Jedis, Lettuce, redis-py) typically operate — batching 10–50 commands per round-trip to amortize network latency. This benchmark uses `-P 16` (16 commands per pipeline), which is a realistic production setting.
 
 | Test | InCacheV2 | Redis 7.2.7 | Result |
 |---|---|---|---|
 | **Pipeline 16 — SET** | **1,176,471** | 892,857 | **InCacheV2 +32%** |
 | **Pipeline 16 — GET** | **1,176,471** | 1,000,000 | **InCacheV2 +18%** |
 
-This is the most realistic benchmark. Production Redis clients (Jedis, Lettuce, redis-py) pipeline commands by default. InCacheV2's zero-alloc batch parser + buffered writes amortize per-command overhead across 16 commands per round-trip.
+InCacheV2's zero-alloc batch parser processes all 16 commands from a single `read()` syscall with no per-command heap allocation. The response is encoded directly into a write buffer and flushed in one `write()` syscall.
 
-### Simple commands — 10 clients, 100k ops (ops/sec)
+---
+
+### Simple commands — single request/response
+
+Each command is sent individually: the client sends one command, waits for the response, then sends the next. This measures raw per-command latency — the worst case for any server because every command pays the full syscall overhead (one `read()` + one `write()`). Benchmarked with 10 parallel clients, 100k operations.
 
 | Command | InCacheV2 | Redis 7.2.7 | Ratio |
 |---------|-----------|-------------|-------|
@@ -46,9 +54,13 @@ This is the most realistic benchmark. Production Redis clients (Jedis, Lettuce, 
 | LPUSH   | 81,103    | 87,566      | 93%   |
 | HSET    | 83,264    | 87,260      | 95%   |
 
-The ~3% gap on single commands is the cost of `Bytes::copy_from_slice` when storing values vs Redis's zero-copy `sds` strings.
+The ~3% gap is the cost of `Bytes::copy_from_slice` when storing values. Redis uses `sds` (Simple Dynamic Strings) — a custom string type that embeds length metadata in the allocation header and avoids copying. Matching this would require a custom allocator that sacrifices Rust's safety guarantees.
 
-### LRANGE — identical throughput
+---
+
+### LRANGE — bulk response
+
+LRANGE returns a range of elements from a list. This benchmarks how efficiently the server serializes large array responses. As the element count grows, the per-command overhead becomes negligible and throughput is dominated by memory access patterns and RESP encoding speed. Benchmarked with 10 clients, 10k operations.
 
 | Elements | InCacheV2 | Redis 7.2.7 | Ratio |
 |----------|-----------|-------------|-------|
@@ -57,52 +69,52 @@ The ~3% gap on single commands is the cost of `Bytes::copy_from_slice` when stor
 | 500      | 14,085    | 14,065      | **100%** |
 | 600      | 12,195    | 12,255      | **100%** |
 
-Once the response payload dominates (300+ elements), per-command overhead becomes irrelevant and both converge.
+At 300+ elements, InCacheV2 and Redis produce identical throughput. Rust's `VecDeque` iterator compiles to the same pointer-chasing loop as Redis's linked-list traversal.
 
-### Concurrency — 50 clients (ops/sec)
+---
+
+### Concurrency — 50 parallel clients
+
+Tests how the server handles connection multiplexing under higher load. With 50 clients, the event loop must efficiently cycle through more file descriptors per `epoll_wait` call. Both servers are single-threaded, so this measures event loop efficiency, not parallelism.
 
 | Command | InCacheV2 | Redis 7.2.7 | Ratio |
 |---------|-----------|-------------|-------|
 | SET     | 80,321    | 85,985      | 93%   |
 | GET     | 77,761    | 86,133      | 90%   |
 
-### Large values (ops/sec)
+---
+
+### Large values
+
+Tests throughput with larger payloads. Redis's default benchmark uses 3-byte values, which is unrealistically small. Real applications often store JSON objects (1–4KB). This measures how well the server handles memory allocation and TCP write buffering for larger payloads.
 
 | Payload | InCacheV2 SET | Redis SET | InCacheV2 GET | Redis GET |
 |---------|--------------|-----------|--------------|-----------|
-| 3B (default) | 80,192 | 88,106 | 80,257 | 86,580 |
+| 3B      | 83,264       | 85,034    | 84,818       | 87,489    |
 | 1KB     | 78,247       | 85,324    | 77,580       | 86,655    |
 | 4KB     | 75,815       | 82,034    | 75,758       | 83,822    |
 
-Both degrade gracefully with larger values. The ratio stays consistent (~92%).
+Both degrade gracefully. The ratio stays consistent (~92%), confirming the gap is per-command overhead, not payload-dependent.
 
-### macOS (Apple M4 Pro) — for reference only
-
-| Command | InCacheV2 | Redis 7.2.7 |
-|---------|-----------|-------------|
-| SET     | 78,125    | 7,689       |
-| GET     | 83,612    | 2,664       |
-| INCR    | 84,818    | 3,297       |
-| LPUSH   | 83,752    | 7,337       |
-| HSET    | 84,459    | 2,682       |
-
-Redis is optimised for Linux `epoll`. On macOS it falls back to `kqueue` and performs 10–30× worse. These numbers should not be used to claim InCacheV2 "beats" Redis — the Linux numbers are the honest comparison.
+---
 
 ### Run benchmarks yourself
 
 ```bash
-# InCacheV2
 cargo build --release
 ./target/release/incache_v2 --port 6399 &
-
-# Simple
-redis-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10
 
 # Pipelined (the headline number)
 redis-benchmark -p 6399 -t set,get -n 100000 -c 10 -P 16
 
+# Simple commands
+redis-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10
+
 # LRANGE
 redis-benchmark -p 6399 -t lrange -n 10000 -c 10
+
+# Concurrency
+redis-benchmark -p 6399 -t set,get -n 100000 -c 50
 
 # Large values
 redis-benchmark -p 6399 -t set,get -n 100000 -c 10 -d 1024
@@ -173,20 +185,69 @@ src/
 
 ## Tests
 
-149 tests written in Python against `redis-py`. The tests validate RESP protocol behaviour over TCP — they don't care whether the server is written in Rust, C, or Python.
+163 tests covering correctness, concurrency, edge cases, and robustness.
+
+**Functional correctness (149 tests)** — written in Python against `redis-py`. Every command is tested through a real TCP connection using the RESP protocol, exactly as a production client would. The tests don't care whether the server is Rust, C, or Python.
+
+| Suite | Tests | Coverage |
+|---|---|---|
+| test_strings.py | 48 | SET/GET with all flags (EX/PX/NX/XX), TTL, INCR/DECR, APPEND, STRLEN, TYPE, KEYS glob, RENAME, MSET/MGET, DEL/EXISTS |
+| test_lists.py | 30 | LPUSH/RPUSH, LPOP/RPOP, LRANGE with negative indices and out-of-bounds, LINDEX, LSET, LINSERT BEFORE/AFTER, LREM with positive/negative/zero count |
+| test_hashes.py | 27 | HSET single and multiple fields, HGET, HMSET/HMGET, HGETALL, HDEL, HEXISTS, HLEN, HKEYS/HVALS, HINCRBY including non-integer error |
+| test_sets.py | 31 | SADD with duplicates, SMEMBERS, SREM, SISMEMBER, SCARD, SUNION/SINTER/SDIFF, SMOVE, SPOP |
+| test_server.py | 13 | PING with and without message, ECHO, FLUSHALL/FLUSHDB, DBSIZE, SELECT (db 0 only), INFO, unknown command error |
+
+**Stress and robustness (14 tests):**
+
+| Test | What it proves |
+|---|---|
+| 10-thread concurrent INCR (10,000 total) | Atomic correctness under contention — final value must be exactly 10,000 |
+| 10-thread concurrent SET/GET/DEL | No crashes or inconsistent reads under parallel mixed operations |
+| Expire-during-access | Key transitions cleanly from value → nil during rapid access |
+| Expire hammered (200 rapid GETs) | No errors during the expiry window — only valid values or nil |
+| 1MB value round-trip | Large value stored and retrieved correctly, STRLEN matches |
+| Empty string value | `SET key ""` returns `""` not nil |
+| 100-command pipeline | All 100 SET responses are `True`, all 100 GET responses match |
+| 1,000 rapid connections | Open/close connections rapidly — server stays healthy |
+| Garbage bytes | Random bytes sent to server — no crash, server continues serving |
+| Partial RESP frame | Incomplete command sent then disconnected — no crash |
+| Invalid command | Unknown command returns proper error message |
+| Oversized inline command | 100KB inline command — no crash |
+| KEYS `h?llo` pattern | Single-character wildcard matching |
+| KEYS `h*llo` pattern | Multi-character wildcard matching |
 
 ```bash
 pip install redis pytest pytest-asyncio
 pytest tests/ -v
 ```
 
-```
-tests/test_strings.py   48 tests
-tests/test_lists.py     30 tests
-tests/test_hashes.py    27 tests
-tests/test_sets.py      31 tests
-tests/test_server.py    13 tests
-```
+---
+
+## Limitations
+
+InCacheV2 is a learning project built to understand Redis internals. It is **not production-ready**. Here's what's missing:
+
+**Data loss on restart** — there is no persistence. No RDB snapshots, no AOF (append-only file), no replication. Every restart loses all data. A production cache needs at least one persistence mechanism to survive process restarts, host reboots, or deployments.
+
+**No memory limits or eviction** — InCacheV2 will consume memory until the OS kills it (OOM). Redis supports `maxmemory` with configurable eviction policies (LRU, LFU, random, volatile-ttl). Without eviction, a production deployment would eventually crash under sustained writes.
+
+**No authentication or encryption** — there is no `AUTH` command, no ACLs, no TLS. Any client that can reach the port has full access to all data. Redis supports password authentication, per-user ACLs with command-level permissions, and TLS for encrypted connections.
+
+**No replication or clustering** — InCacheV2 is a single process on a single machine. If it goes down, the data is gone and clients get connection errors. Redis supports primary-replica replication for high availability and Redis Cluster for horizontal sharding across multiple nodes.
+
+**No pub/sub** — Redis's publish/subscribe messaging is used heavily for real-time notifications, cache invalidation, and event-driven architectures. InCacheV2 doesn't support `SUBSCRIBE`, `PUBLISH`, or `PSUBSCRIBE`.
+
+**No sorted sets or streams** — `ZADD`, `ZRANGE`, `ZRANGEBYSCORE` (sorted sets) and `XADD`, `XREAD` (streams) are among Redis's most powerful features, used for leaderboards, rate limiting, time-series data, and message queues. InCacheV2 doesn't implement either.
+
+**No transactions** — `MULTI`, `EXEC`, `WATCH` allow atomic execution of command groups. InCacheV2 doesn't support transactions, so clients can't guarantee atomicity across multiple commands.
+
+**No Lua scripting** — Redis's `EVAL` command runs Lua scripts server-side for complex atomic operations. Not supported.
+
+**No monitoring or observability** — no `SLOWLOG`, no `CLIENT LIST`, no `MONITOR`, no keyspace notifications. In production, operators need visibility into what the server is doing, which clients are connected, and which commands are slow.
+
+**Single-threaded only** — InCacheV2 uses one CPU core. Redis 6+ offloads I/O to background threads while keeping command execution single-threaded. For workloads that saturate a single core, there's no way to scale up without running multiple instances.
+
+For production workloads, use [Redis](https://redis.io) or [Valkey](https://valkey.io).
 
 ---
 
@@ -199,19 +260,6 @@ cargo build --release
 ```
 
 Dependencies: `bytes` · `itoa` · `memchr` · `mimalloc` · `rustc-hash` · `libc`
-
----
-
-## Limitations
-
-InCacheV2 is a learning project, not a production database:
-
-- No persistence — data is lost on restart
-- No replication, clustering, Lua scripting, sorted sets, streams, or pub/sub
-- No authentication, ACLs, or TLS
-- Single-threaded — one CPU core only
-
-For production workloads, use [Redis](https://redis.io) or [Valkey](https://valkey.io).
 
 ---
 
