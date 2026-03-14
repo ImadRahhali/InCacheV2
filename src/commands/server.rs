@@ -1,78 +1,70 @@
+use bytes::Bytes;
 use crate::protocol::RespValue;
 use crate::store::Store;
 
 const COMMAND_COUNT: i64 = 45;
 
-pub fn cmd_ping(args: &[Vec<u8>]) -> RespValue {
+pub fn cmd_ping(args: &[Bytes]) -> RespValue {
     if let Some(msg) = args.first() {
-        RespValue::BulkString(msg.clone())
+        RespValue::bulk(msg.clone())
     } else {
-        RespValue::SimpleString("PONG".into())
+        RespValue::pong()
     }
 }
 
-pub fn cmd_echo(args: &[Vec<u8>]) -> RespValue {
+pub fn cmd_echo(args: &[Bytes]) -> RespValue {
     if let Some(msg) = args.first() {
-        RespValue::BulkString(msg.clone())
+        RespValue::bulk(msg.clone())
     } else {
-        RespValue::Error("ERR wrong number of arguments for 'echo' command".into())
+        RespValue::error("ERR wrong number of arguments for 'echo' command".into())
     }
 }
 
-pub fn cmd_hello(_args: &[Vec<u8>]) -> RespValue {
+pub fn cmd_hello(_args: &[Bytes]) -> RespValue {
     RespValue::Array(vec![
-        RespValue::BulkString(b"server".to_vec()),
-        RespValue::BulkString(b"incache_v2".to_vec()),
-        RespValue::BulkString(b"version".to_vec()),
-        RespValue::BulkString(b"0.1.0".to_vec()),
-        RespValue::BulkString(b"proto".to_vec()),
-        RespValue::Integer(2),
-        RespValue::BulkString(b"id".to_vec()),
-        RespValue::Integer(1),
-        RespValue::BulkString(b"mode".to_vec()),
-        RespValue::BulkString(b"standalone".to_vec()),
-        RespValue::BulkString(b"role".to_vec()),
-        RespValue::BulkString(b"master".to_vec()),
-        RespValue::BulkString(b"modules".to_vec()),
-        RespValue::Array(vec![]),
+        RespValue::bulk_from(b"server"), RespValue::bulk_from(b"incache_v2"),
+        RespValue::bulk_from(b"version"), RespValue::bulk_from(b"0.2.0"),
+        RespValue::bulk_from(b"proto"), RespValue::Integer(2),
+        RespValue::bulk_from(b"id"), RespValue::Integer(1),
+        RespValue::bulk_from(b"mode"), RespValue::bulk_from(b"standalone"),
+        RespValue::bulk_from(b"role"), RespValue::bulk_from(b"master"),
+        RespValue::bulk_from(b"modules"), RespValue::Array(vec![]),
     ])
 }
 
-pub fn cmd_flush(store: &mut Store) -> RespValue {
+pub fn cmd_flush(store: &Store) -> RespValue {
     store.flush();
-    RespValue::SimpleString("OK".into())
+    RespValue::ok()
 }
 
-pub fn cmd_dbsize(store: &mut Store) -> RespValue {
+pub fn cmd_dbsize(store: &Store) -> RespValue {
     RespValue::Integer(store.dbsize() as i64)
 }
 
 pub fn cmd_info() -> RespValue {
-    let info = "# Server\r\nredis_version:0.1.0 (incache_v2/Rust)\r\ntcp_port:6399\r\n";
-    RespValue::BulkString(info.as_bytes().to_vec())
+    RespValue::BulkString(Bytes::from_static(
+        b"# Server\r\nredis_version:0.2.0 (incache_v2/Rust)\r\ntcp_port:6399\r\n"
+    ))
 }
 
-pub fn cmd_select(args: &[Vec<u8>]) -> RespValue {
+pub fn cmd_select(args: &[Bytes]) -> RespValue {
     if args.is_empty() {
-        return RespValue::Error("ERR wrong number of arguments for 'select' command".into());
+        return RespValue::error("ERR wrong number of arguments for 'select' command".into());
     }
-    let db = String::from_utf8_lossy(&args[0]);
-    if db == "0" {
-        RespValue::SimpleString("OK".into())
+    if args[0] == &b"0"[..] {
+        RespValue::ok()
     } else {
-        RespValue::Error("ERR DB index is out of range".into())
+        RespValue::error("ERR DB index is out of range".into())
     }
 }
 
-pub fn cmd_command(args: &[Vec<u8>]) -> RespValue {
+pub fn cmd_command(args: &[Bytes]) -> RespValue {
     if let Some(sub) = args.first() {
-        if sub.to_ascii_uppercase() == b"COUNT" {
+        let mut u = sub.to_vec();
+        u.make_ascii_uppercase();
+        if u == b"COUNT" {
             return RespValue::Integer(COMMAND_COUNT);
         }
     }
     RespValue::Integer(COMMAND_COUNT)
-}
-
-pub fn cmd_client(_args: &[Vec<u8>]) -> RespValue {
-    RespValue::SimpleString("OK".into())
 }

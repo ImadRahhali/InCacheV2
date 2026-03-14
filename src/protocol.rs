@@ -1,32 +1,49 @@
 /// RESP2 protocol parser and serialiser.
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut, BufMut};
 
 #[derive(Debug, Clone)]
 pub enum RespValue {
-    SimpleString(String),
-    Error(String),
+    SimpleString(Bytes),
+    Error(Bytes),
     Integer(i64),
-    BulkString(Vec<u8>),
+    BulkString(Bytes),
     Array(Vec<RespValue>),
     Null,
 }
 
-/// Try to parse one complete RESP value from buf.
-/// Returns Some((value, bytes_consumed)) or None if incomplete.
-pub fn parse_one(buf: &[u8]) -> Option<(RespValue, usize)> {
-    if buf.is_empty() {
-        return None;
+impl RespValue {
+    #[inline]
+    pub fn ok() -> Self { RespValue::SimpleString(Bytes::from_static(b"OK")) }
+    #[inline]
+    pub fn pong() -> Self { RespValue::SimpleString(Bytes::from_static(b"PONG")) }
+    #[inline]
+    pub fn simple(s: &'static str) -> Self { RespValue::SimpleString(Bytes::from_static(s.as_bytes())) }
+    #[inline]
+    pub fn error(s: String) -> Self { RespValue::Error(Bytes::from(s)) }
+    #[inline]
+    pub fn wrongtype() -> Self {
+        RespValue::Error(Bytes::from_static(b"WRONGTYPE Operation against a key holding the wrong kind of value"))
     }
+    #[inline]
+    pub fn bulk(b: Bytes) -> Self { RespValue::BulkString(b) }
+    #[inline]
+    pub fn bulk_from(b: &[u8]) -> Self { RespValue::BulkString(Bytes::copy_from_slice(b)) }
+    #[inline]
+    pub fn simple_from_str(s: &str) -> Self { RespValue::SimpleString(Bytes::copy_from_slice(s.as_bytes())) }
+}
 
-    // Inline command (no RESP prefix)
+/// Try to parse one complete RESP value from buf.
+pub fn parse_one(buf: &[u8]) -> Option<(RespValue, usize)> {
+    if buf.is_empty() { return None; }
+
     match buf[0] {
         b'+' | b'-' | b':' | b'$' | b'*' => {}
         _ => {
+            // Inline command
             let idx = find_crlf(buf)?;
             let line = std::str::from_utf8(&buf[..idx]).ok()?;
-            let parts: Vec<RespValue> = line
-                .split_whitespace()
-                .map(|s| RespValue::BulkString(s.as_bytes().to_vec()))
+            let parts: Vec<RespValue> = line.split_whitespace()
+                .map(|s| RespValue::BulkString(Bytes::copy_from_slice(s.as_bytes())))
                 .collect();
             return Some((RespValue::Array(parts), idx + 2));
         }
@@ -36,36 +53,23 @@ pub fn parse_one(buf: &[u8]) -> Option<(RespValue, usize)> {
     let line = &buf[1..idx];
 
     match buf[0] {
-        b'+' => {
-            let s = String::from_utf8_lossy(line).into_owned();
-            Some((RespValue::SimpleString(s), idx + 2))
-        }
-        b'-' => {
-            let s = String::from_utf8_lossy(line).into_owned();
-            Some((RespValue::Error(s), idx + 2))
-        }
+        b'+' => Some((RespValue::SimpleString(Bytes::copy_from_slice(line)), idx + 2)),
+        b'-' => Some((RespValue::Error(Bytes::copy_from_slice(line)), idx + 2)),
         b':' => {
             let n: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
             Some((RespValue::Integer(n), idx + 2))
         }
         b'$' => {
             let len: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
-            if len == -1 {
-                return Some((RespValue::Null, idx + 2));
-            }
+            if len == -1 { return Some((RespValue::Null, idx + 2)); }
             let len = len as usize;
             let end = idx + 2 + len + 2;
-            if buf.len() < end {
-                return None;
-            }
-            let data = buf[idx + 2..idx + 2 + len].to_vec();
-            Some((RespValue::BulkString(data), end))
+            if buf.len() < end { return None; }
+            Some((RespValue::BulkString(Bytes::copy_from_slice(&buf[idx + 2..idx + 2 + len])), end))
         }
         b'*' => {
             let count: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
-            if count == -1 {
-                return Some((RespValue::Null, idx + 2));
-            }
+            if count == -1 { return Some((RespValue::Null, idx + 2)); }
             let count = count as usize;
             let mut pos = idx + 2;
             let mut items = Vec::with_capacity(count);
@@ -80,21 +84,18 @@ pub fn parse_one(buf: &[u8]) -> Option<(RespValue, usize)> {
     }
 }
 
-/// Parse all complete commands from buffer, returning them and advancing the buffer.
-pub fn parse_all(buf: &mut BytesMut) -> Vec<Vec<Vec<u8>>> {
+/// Parse all complete commands from buffer.
+pub fn parse_all(buf: &mut BytesMut) -> Vec<Vec<Bytes>> {
     let mut commands = Vec::new();
     loop {
         match parse_one(buf) {
             Some((RespValue::Array(items), consumed)) => {
-                let cmd: Vec<Vec<u8>> = items
-                    .into_iter()
-                    .map(|v| match v {
-                        RespValue::BulkString(b) => b,
-                        RespValue::SimpleString(s) => s.into_bytes(),
-                        RespValue::Integer(n) => n.to_string().into_bytes(),
-                        _ => Vec::new(),
-                    })
-                    .collect();
+                let cmd: Vec<Bytes> = items.into_iter().map(|v| match v {
+                    RespValue::BulkString(b) => b,
+                    RespValue::SimpleString(s) => s,
+                    RespValue::Integer(n) => Bytes::from(n.to_string()),
+                    _ => Bytes::new(),
+                }).collect();
                 buf.advance(consumed);
                 commands.push(cmd);
             }
@@ -104,29 +105,47 @@ pub fn parse_all(buf: &mut BytesMut) -> Vec<Vec<Vec<u8>>> {
     commands
 }
 
-/// Encode a RespValue into RESP2 bytes.
-pub fn encode(value: &RespValue) -> Vec<u8> {
+/// Encode a RespValue directly into a BytesMut buffer.
+#[inline]
+pub fn encode_into(value: &RespValue, out: &mut BytesMut) {
     match value {
-        RespValue::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
-        RespValue::Error(s) => format!("-{}\r\n", s).into_bytes(),
-        RespValue::Integer(n) => format!(":{}\r\n", n).into_bytes(),
+        RespValue::SimpleString(s) => {
+            out.put_u8(b'+');
+            out.extend_from_slice(s);
+            out.extend_from_slice(b"\r\n");
+        }
+        RespValue::Error(s) => {
+            out.put_u8(b'-');
+            out.extend_from_slice(s);
+            out.extend_from_slice(b"\r\n");
+        }
+        RespValue::Integer(n) => {
+            out.put_u8(b':');
+            out.extend_from_slice(itoa::Buffer::new().format(*n).as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
         RespValue::BulkString(b) => {
-            let mut out = format!("${}\r\n", b.len()).into_bytes();
+            out.put_u8(b'$');
+            out.extend_from_slice(itoa::Buffer::new().format(b.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
             out.extend_from_slice(b);
             out.extend_from_slice(b"\r\n");
-            out
         }
-        RespValue::Null => b"$-1\r\n".to_vec(),
+        RespValue::Null => {
+            out.extend_from_slice(b"$-1\r\n");
+        }
         RespValue::Array(items) => {
-            let mut out = format!("*{}\r\n", items.len()).into_bytes();
+            out.put_u8(b'*');
+            out.extend_from_slice(itoa::Buffer::new().format(items.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
             for item in items {
-                out.extend_from_slice(&encode(item));
+                encode_into(item, out);
             }
-            out
         }
     }
 }
 
+#[inline]
 fn find_crlf(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\r\n")
+    memchr::memchr(b'\r', buf).filter(|&i| i + 1 < buf.len() && buf[i + 1] == b'\n')
 }

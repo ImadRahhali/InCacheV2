@@ -1,14 +1,14 @@
 use bytes::BytesMut;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 
-use crate::protocol::{encode, parse_all};
-use crate::store::{new_shared_store, start_expiry_sweep, SharedStore};
+use crate::protocol::{encode_into, parse_all};
+use crate::store::Store;
 use crate::commands::dispatch;
 
 pub async fn run_server(host: &str, port: u16) {
-    let store = new_shared_store();
-    start_expiry_sweep(store.clone());
+    let store = Store::new();
+    store.start_expiry_sweep();
 
     let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await.unwrap();
@@ -20,34 +20,34 @@ pub async fn run_server(host: &str, port: u16) {
     }
 }
 
-async fn handle_client(mut socket: tokio::net::TcpStream, store: SharedStore) {
+async fn handle_client(socket: tokio::net::TcpStream, store: Store) {
+    let (reader, writer) = socket.into_split();
+    let mut reader = reader;
+    let mut writer = BufWriter::new(writer);
     let mut buf = BytesMut::with_capacity(65536);
+    let mut resp_buf = BytesMut::with_capacity(4096);
+
     loop {
-        match socket.read_buf(&mut buf).await {
+        match reader.read_buf(&mut buf).await {
             Ok(0) => break,
             Ok(_) => {}
             Err(_) => break,
         }
 
         let commands = parse_all(&mut buf);
-        let mut response = Vec::new();
+        resp_buf.clear();
 
         for cmd_parts in commands {
-            if cmd_parts.is_empty() {
-                continue;
-            }
-            let cmd_name = String::from_utf8_lossy(&cmd_parts[0]).to_uppercase();
+            if cmd_parts.is_empty() { continue; }
+            let cmd_name = &cmd_parts[0];
             let args = &cmd_parts[1..];
-
-            let mut store = store.lock().await;
-            let result = dispatch(&mut store, &cmd_name, args);
-            response.extend_from_slice(&encode(&result));
+            let result = dispatch(&store, cmd_name, args);
+            encode_into(&result, &mut resp_buf);
         }
 
-        if !response.is_empty() {
-            if socket.write_all(&response).await.is_err() {
-                break;
-            }
+        if !resp_buf.is_empty() {
+            if writer.write_all(&resp_buf).await.is_err() { break; }
+            if writer.flush().await.is_err() { break; }
         }
     }
 }
