@@ -171,16 +171,11 @@ pub fn run_server(host: &str, port: u16) {
 
 #[inline(always)]
 fn handle(conn: &mut Conn, store: &mut Store) -> bool {
-    // Read directly into BytesMut spare capacity — zero intermediate copy
+    let mut tmp = [0u8; 65536];
     loop {
-        if conn.read_buf.capacity() - conn.read_buf.len() < 4096 {
-            conn.read_buf.reserve(32768);
-        }
-        let chunk = conn.read_buf.chunk_mut();
-        let slice = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut u8, chunk.len()) };
-        match conn.stream.read(slice) {
+        match conn.stream.read(&mut tmp) {
             Ok(0) => return true,
-            Ok(n) => unsafe { conn.read_buf.advance_mut(n); },
+            Ok(n) => conn.read_buf.extend_from_slice(&tmp[..n]),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(_) => return true,
         }
