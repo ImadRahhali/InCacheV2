@@ -140,9 +140,13 @@ redis-benchmark -p 6399 -t set,get -n 100000 -c 10 -d 4096
 
 **Key commands** — `TYPE`, `RENAME`, `KEYS` (glob patterns), `EXISTS`, `DEL`
 
-**Server** — `PING`, `ECHO`, `FLUSHALL`, `FLUSHDB`, `DBSIZE`, `INFO`, `SELECT`, `COMMAND COUNT`, `HELLO`
+**Server** — `PING`, `ECHO`, `FLUSHALL`, `FLUSHDB`, `DBSIZE`, `INFO`, `SELECT`, `COMMAND COUNT`, `HELLO`, `AUTH`, `SLOWLOG GET/LEN/RESET`
+
+**Transactions** — `MULTI`, `EXEC`, `DISCARD`
 
 **Protocol** — full RESP2, pipelining, partial frame reads, inline commands
+
+**Authentication** — `--requirepass <password>` flag, `AUTH` command
 
 ---
 
@@ -185,7 +189,7 @@ src/
 
 ## Tests
 
-163 tests covering correctness, concurrency, edge cases, and robustness.
+175 tests covering correctness, concurrency, edge cases, robustness, and feature compliance.
 
 **Functional correctness (149 tests)** — written in Python against `redis-py`. Every command is tested through a real TCP connection using the RESP protocol, exactly as a production client would. The tests don't care whether the server is Rust, C, or Python.
 
@@ -216,6 +220,23 @@ src/
 | KEYS `h?llo` pattern | Single-character wildcard matching |
 | KEYS `h*llo` pattern | Multi-character wildcard matching |
 
+**Feature tests (12 tests):**
+
+| Test | What it proves |
+|---|---|
+| AUTH required | Unauthenticated SET is rejected |
+| AUTH wrong password | Wrong password is rejected |
+| AUTH correct password | Authenticated client can SET/GET |
+| PING without auth | PING works without authentication |
+| MULTI/EXEC basic | Transaction returns all results as array |
+| MULTI/EXEC INCR | Three INCRs in transaction return [1, 2, 3] |
+| DISCARD | Cancels queued commands, key unchanged |
+| EXEC without MULTI | Returns error |
+| DISCARD without MULTI | Returns error |
+| SLOWLOG LEN | Returns integer count |
+| SLOWLOG RESET | Clears the log |
+| SLOWLOG GET | Returns list of entries |
+
 ```bash
 pip install redis pytest pytest-asyncio
 pytest tests/ -v
@@ -231,7 +252,7 @@ InCacheV2 is a learning project built to understand Redis internals. It is **not
 
 **No memory limits or eviction** — InCacheV2 will consume memory until the OS kills it (OOM). Redis supports `maxmemory` with configurable eviction policies (LRU, LFU, random, volatile-ttl). Without eviction, a production deployment would eventually crash under sustained writes.
 
-**No authentication or encryption** — there is no `AUTH` command, no ACLs, no TLS. Any client that can reach the port has full access to all data. Redis supports password authentication, per-user ACLs with command-level permissions, and TLS for encrypted connections.
+**No ACLs or TLS** — InCacheV2 supports password authentication (`--requirepass`) but not per-user ACLs or TLS encrypted connections.
 
 **No replication or clustering** — InCacheV2 is a single process on a single machine. If it goes down, the data is gone and clients get connection errors. Redis supports primary-replica replication for high availability and Redis Cluster for horizontal sharding across multiple nodes.
 
@@ -239,11 +260,9 @@ InCacheV2 is a learning project built to understand Redis internals. It is **not
 
 **No sorted sets or streams** — `ZADD`, `ZRANGE`, `ZRANGEBYSCORE` (sorted sets) and `XADD`, `XREAD` (streams) are among Redis's most powerful features, used for leaderboards, rate limiting, time-series data, and message queues. InCacheV2 doesn't implement either.
 
-**No transactions** — `MULTI`, `EXEC`, `WATCH` allow atomic execution of command groups. InCacheV2 doesn't support transactions, so clients can't guarantee atomicity across multiple commands.
-
 **No Lua scripting** — Redis's `EVAL` command runs Lua scripts server-side for complex atomic operations. Not supported.
 
-**No monitoring or observability** — no `SLOWLOG`, no `CLIENT LIST`, no `MONITOR`, no keyspace notifications. In production, operators need visibility into what the server is doing, which clients are connected, and which commands are slow.
+**No monitoring or observability** — no `CLIENT LIST`, no `MONITOR`, no keyspace notifications. InCacheV2 supports `SLOWLOG` for identifying slow commands, but lacks the full observability suite that production deployments need.
 
 **Single-threaded only** — InCacheV2 uses one CPU core. Redis 6+ offloads I/O to background threads while keeping command execution single-threaded. For workloads that saturate a single core, there's no way to scale up without running multiple instances.
 
@@ -257,6 +276,7 @@ For production workloads, use [Redis](https://redis.io) or [Valkey](https://valk
 cargo build --release
 ./target/release/incache_v2                     # default: 0.0.0.0:6399
 ./target/release/incache_v2 --port 6380         # custom port
+./target/release/incache_v2 --requirepass secret # password protected
 ```
 
 Dependencies: `bytes` · `itoa` · `memchr` · `mimalloc` · `rustc-hash` · `libc`
