@@ -25,72 +25,84 @@ r.sadd("tags", "rust", "cache", "redis")
 
 ## Benchmarks
 
-All benchmarks on **Apple M4 Pro**, macOS, 100k operations (10k for LRANGE), 10 parallel clients, using `valkey-benchmark`. All three tested in the same session for a fair comparison.
+All benchmarks using `valkey-benchmark`, 100k operations (10k for LRANGE), 10 parallel clients. Redis 7.2.7 on both platforms.
 
-### Simple commands (ops/sec)
+- **Mac**: Apple M4 Pro, macOS
+- **Linux**: Intel Xeon Platinum 8175M (8 cores / 16 threads), Amazon Linux 2
 
-| Command | InCacheV2 (Rust) | InCache (Python) | Rust vs Python | Redis 8.6.1 (macOS) | Redis 8.6.1 (Linux)* |
-|---------|-----------------|-----------------|----------------|---------------------|----------------------|
-| SET     | **73,475**      | 55,991          | 1.3×           | 7,184               | ~110,000             |
-| GET     | **78,064**      | 57,471          | 1.4×           | 3,903               | ~120,000             |
-| INCR    | **78,064**      | 57,637          | 1.4×           | 4,849               | ~110,000             |
-| LPUSH   | **77,519**      | 56,117          | 1.4×           | 4,480               | ~110,000             |
-| HSET    | **78,186**      | 55,371          | 1.4×           | 6,538               | ~105,000             |
+### Linux — Simple commands (ops/sec)
 
-*Linux estimates from Redis official benchmarks on comparable hardware.
+| Command | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
+|---------|-----------------|-----------------|-------------|
+| SET     | **85,763**      | 36,337          | 90,992      |
+| GET     | **83,472**      | 37,313          | 90,992      |
+| INCR    | **84,818**      | 37,175          | 92,507      |
+| LPUSH   | **82,850**      | 35,855          | 92,678      |
+| HSET    | **85,690**      | 34,305          | 90,090      |
 
-### LRANGE (ops/sec)
+### Linux — LRANGE (ops/sec)
 
-| Elements | InCacheV2 (Rust) | InCache (Python) | Rust vs Python |
-|----------|-----------------|-----------------|----------------|
-| 100      | **59,524**      | 24,213          | **2.5×**       |
-| 300      | **40,161**      | 12,547          | **3.2×**       |
-| 500      | **30,581**      | 8,584           | **3.6×**       |
-| 600      | **27,933**      | 7,463           | **3.7×**       |
+| Elements | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
+|----------|-----------------|-----------------|-------------|
+| 100      | **46,948**      | 11,351          | 51,020      |
+| 300      | **21,008**      | 5,061           | 21,186      |
+| 500      | **13,928**      | 3,252           | 14,556      |
+| 600      | **12,392**      | 2,761           | 12,438      |
 
-### Latency (p50 / p99, milliseconds)
+### macOS — Simple commands (ops/sec)
 
-| Command | InCacheV2 (Rust)    | InCache (Python)  | Redis 8.6.1 (macOS) |
-|---------|---------------------|-------------------|---------------------|
-| SET     | **0.119 / 0.159**   | 0.167 / 0.199     | 1.335 / 3.807       |
-| GET     | **0.119 / 0.199**   | 0.167 / 0.191     | 2.023 / 7.079       |
-| INCR    | **0.119 / 0.175**   | 0.167 / 0.239     | 1.415 / 6.511       |
-| LPUSH   | **0.119 / 0.167**   | 0.175 / 0.215     | 1.511 / 6.759       |
-| HSET    | **0.119 / 0.159**   | 0.175 / 0.215     | 1.335 / 4.775       |
+| Command | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
+|---------|-----------------|-----------------|-------------|
+| SET     | **74,460**      | 55,463          | 5,336       |
+| GET     | **78,802**      | 58,343          | 5,772       |
+| INCR    | **78,555**      | 59,524          | 4,164       |
+| LPUSH   | **72,622**      | 53,850          | 3,510       |
+| HSET    | **71,891**      | 56,180          | 2,285       |
+
+### macOS — LRANGE (ops/sec)
+
+| Elements | InCacheV2 (Rust) | InCache (Python) | Redis 7.2.7 |
+|----------|-----------------|-----------------|-------------|
+| 100      | **57,803**      | 24,331          | 4,399       |
+| 300      | **40,000**      | 12,107          | 2,503       |
+| 500      | **33,333**      | 8,467           | 3,678       |
+| 600      | **28,736**      | 7,435           | 4,861       |
 
 ### Analysis
 
-**Rust vs Python — simple commands: ~1.4× faster.**
+**Linux is the only honest comparison.** Redis is optimised for Linux `epoll` — on macOS it falls back to `kqueue` and performs 10–20× worse. The macOS numbers are included for completeness but should not be used to claim InCache "beats" Redis.
 
-The gap is modest because both implementations are bottlenecked by the same thing: a single lock serialising all data access. In Python it's `asyncio.Lock`, in Rust it's `DashMap`'s per-shard locks. The Rust advantage comes from:
-- No interpreter overhead, no GC pauses
-- Zero-copy `Bytes` values instead of Python object allocations
-- `memchr` + `itoa` for fast RESP parsing/encoding
-- `BufWriter` batching TCP writes
+**On Linux, InCacheV2 reaches ~93% of Redis throughput:**
 
-**Rust vs Python — LRANGE: 2.5–3.7× faster.**
+| | InCacheV2 (Rust) | Redis 7.2.7 | Ratio |
+|---|---|---|---|
+| Avg simple commands | ~84,500 | ~91,400 | 92% |
+| LRANGE 100 | 46,948 | 51,020 | 92% |
+| LRANGE 600 | 12,392 | 12,438 | **99.6%** |
 
-This is where Rust shines. Python's `itertools.islice` over a `deque` still has interpreter overhead per element. Rust's `VecDeque::iter().skip().take()` compiles to a tight pointer-chasing loop with zero allocation. The gap widens with more elements (3.7× at 600 elements).
+**Rust vs Python — Linux:**
 
-**Why do both InCache versions beat Redis on macOS?**
+| | Rust | Python | Speedup |
+|---|---|---|---|
+| Simple commands | ~84,500 | ~36,200 | **2.3×** |
+| LRANGE 100 | 46,948 | 11,351 | **4.1×** |
+| LRANGE 600 | 12,392 | 2,761 | **4.5×** |
 
-They don't — not in any meaningful sense. **On Linux, Redis runs at 100k–120k ops/sec**, faster than both. Redis is optimised for Linux `epoll`; on macOS it falls back to `kqueue` and performs significantly worse. Both Tokio and Python's `asyncio` handle macOS `kqueue` efficiently for this workload.
+The Rust advantage is much larger on Linux than macOS because Python's `asyncio` happens to handle macOS `kqueue` efficiently, masking the interpreter overhead. On Linux with `epoll`, the raw per-command cost dominates — and Rust's zero-overhead abstractions shine.
 
 ### Optimisations in V2
 
-Compared to the initial Rust implementation:
-
 | Optimisation | Impact |
 |---|---|
-| `DashMap` (lock-free concurrent hashmap) | Replaces single `Mutex<Store>` — per-shard locking |
-| `bytes::Bytes` (reference-counted) | Zero-copy value storage, no `Vec<u8>` cloning |
-| `memchr` for CRLF scanning | SIMD-accelerated `\r\n` search in RESP parser |
-| `itoa` for integer encoding | Avoids `format!()` allocation for `:42\r\n` |
-| `encode_into(BytesMut)` | Encodes directly into write buffer, no intermediate `Vec` |
-| `BufWriter<OwnedWriteHalf>` | Batches TCP writes, fewer syscalls |
-| Stack-based command dispatch | `match` on `&[u8]` — no `String` allocation per command |
+| `DashMap` (lock-free concurrent hashmap) | Per-shard locking instead of single `Mutex` |
+| `bytes::Bytes` (reference-counted) | Zero-copy value storage |
+| `memchr` for CRLF scanning | SIMD-accelerated RESP parsing |
+| `itoa` for integer encoding | No `format!()` allocation |
+| `encode_into(BytesMut)` | Direct write-buffer encoding |
+| `BufWriter<OwnedWriteHalf>` | Batched TCP writes |
+| Stack-based command dispatch | `match` on `&[u8]` — zero allocation |
 | `Box<str>` for hash/set keys | 1 word smaller than `String` |
-| LTO + codegen-units=1 | Whole-program optimisation in release builds |
+| LTO + codegen-units=1 | Whole-program optimisation |
 
 ### Run benchmarks yourself
 
@@ -104,6 +116,10 @@ valkey-benchmark -p 6399 -t lrange -n 10000 -c 10
 # InCache (Python)
 pip install incache
 python -m incache --port 6399 &
+valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10
+
+# Redis
+redis-server --port 6399 --save "" --appendonly no --daemonize yes
 valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10
 ```
 
