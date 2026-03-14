@@ -1,12 +1,9 @@
-/// In-memory data store with TTL expiry — lock-free via DashMap.
+/// In-memory data store — single-threaded, zero locking (like Redis).
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use dashmap::DashMap;
-use tokio::time::{interval, Duration};
 use bytes::Bytes;
 
-#[inline]
+#[inline(always)]
 pub fn now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -14,7 +11,7 @@ pub fn now() -> f64 {
         .as_secs_f64()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Value {
     String(Bytes),
     List(VecDeque<Bytes>),
@@ -23,7 +20,7 @@ pub enum Value {
 }
 
 impl Value {
-    #[inline]
+    #[inline(always)]
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::String(_) => "string",
@@ -33,55 +30,43 @@ impl Value {
         }
     }
 
-    #[inline]
-    pub fn collection_len(&self) -> usize {
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
         match self {
-            Value::String(v) => v.len(),
-            Value::List(v) => v.len(),
-            Value::Hash(v) => v.len(),
-            Value::Set(v) => v.len(),
+            Value::String(v) => v.is_empty(),
+            Value::List(v) => v.is_empty(),
+            Value::Hash(v) => v.is_empty(),
+            Value::Set(v) => v.is_empty(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Entry {
     pub value: Value,
     pub expires_at: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Store {
-    data: Arc<DashMap<Box<str>, Entry>>,
+    data: HashMap<String, Entry>,
 }
 
 impl Store {
     pub fn new() -> Self {
-        Store {
-            data: Arc::new(DashMap::with_capacity(1024)),
-        }
+        Store { data: HashMap::with_capacity(1024) }
     }
 
-    pub fn start_expiry_sweep(&self) {
-        let data = self.data.clone();
-        tokio::spawn(async move {
-            let mut tick = interval(Duration::from_millis(100));
-            loop {
-                tick.tick().await;
-                let n = now();
-                data.retain(|_, entry: &mut Entry| {
-                    entry.expires_at.map_or(true, |exp| exp > n)
-                });
-            }
-        });
+    pub fn sweep_expired(&mut self) {
+        let n = now();
+        self.data.retain(|_, e| e.expires_at.map_or(true, |exp| exp > n));
     }
 
-    #[inline]
-    fn check_expired(&self, key: &str) -> bool {
+    #[inline(always)]
+    fn check_expired(&mut self, key: &str) -> bool {
         if let Some(entry) = self.data.get(key) {
             if let Some(exp) = entry.expires_at {
                 if exp <= now() {
-                    drop(entry);
                     self.data.remove(key);
                     return true;
                 }
@@ -90,72 +75,75 @@ impl Store {
         false
     }
 
-    #[inline]
-    pub fn get_type(&self, key: &str) -> &'static str {
+    #[inline(always)]
+    pub fn get_entry(&mut self, key: &str) -> Option<&Entry> {
         self.check_expired(key);
-        match self.data.get(key) {
+        self.data.get(key)
+    }
+
+    #[inline(always)]
+    pub fn get_entry_mut(&mut self, key: &str) -> Option<&mut Entry> {
+        self.check_expired(key);
+        self.data.get_mut(key)
+    }
+
+    #[inline(always)]
+    pub fn get_type(&mut self, key: &str) -> &'static str {
+        match self.get_entry(key) {
             Some(e) => e.value.type_name(),
             None => "none",
         }
     }
 
-    #[inline]
-    pub fn set_value(&self, key: Box<str>, value: Value, expires_at: Option<f64>) {
+    #[inline(always)]
+    pub fn set_value(&mut self, key: String, value: Value, expires_at: Option<f64>) {
         self.data.insert(key, Entry { value, expires_at });
     }
 
-    #[inline]
-    pub fn delete(&self, key: &str) -> bool {
+    #[inline(always)]
+    pub fn delete(&mut self, key: &str) -> bool {
         self.check_expired(key);
         self.data.remove(key).is_some()
     }
 
-    #[inline]
-    pub fn exists(&self, key: &str) -> bool {
+    #[inline(always)]
+    pub fn exists(&mut self, key: &str) -> bool {
         self.check_expired(key);
         self.data.contains_key(key)
     }
 
-    pub fn keys_matching(&self, pattern: &str) -> Vec<Box<str>> {
-        let n = now();
-        self.data.retain(|_, e| e.expires_at.map_or(true, |exp| exp > n));
-        self.data.iter().map(|r| r.key().clone()).filter(|k| glob_match(pattern, k)).collect()
+    pub fn keys_matching(&mut self, pattern: &str) -> Vec<String> {
+        self.sweep_expired();
+        self.data.keys().filter(|k| glob_match(pattern, k)).cloned().collect()
     }
 
-    pub fn flush(&self) {
-        self.data.clear();
-    }
+    #[inline(always)]
+    pub fn flush(&mut self) { self.data.clear(); }
 
-    pub fn dbsize(&self) -> usize {
-        let n = now();
-        self.data.retain(|_, e| e.expires_at.map_or(true, |exp| exp > n));
+    pub fn dbsize(&mut self) -> usize {
+        self.sweep_expired();
         self.data.len()
     }
 
-    pub fn set_expiry(&self, key: &str, expires_at: f64) -> bool {
+    pub fn set_expiry(&mut self, key: &str, expires_at: f64) -> bool {
         self.check_expired(key);
-        if let Some(mut entry) = self.data.get_mut(key) {
+        if let Some(entry) = self.data.get_mut(key) {
             entry.expires_at = Some(expires_at);
             true
-        } else {
-            false
-        }
+        } else { false }
     }
 
-    pub fn get_expiry(&self, key: &str) -> f64 {
+    pub fn get_expiry(&mut self, key: &str) -> f64 {
         self.check_expired(key);
         match self.data.get(key) {
             None => -2.0,
-            Some(e) => match e.expires_at {
-                None => -1.0,
-                Some(exp) => exp,
-            },
+            Some(e) => e.expires_at.unwrap_or(-1.0),
         }
     }
 
-    pub fn persist(&self, key: &str) -> bool {
+    pub fn persist(&mut self, key: &str) -> bool {
         self.check_expired(key);
-        if let Some(mut entry) = self.data.get_mut(key) {
+        if let Some(entry) = self.data.get_mut(key) {
             if entry.expires_at.is_some() {
                 entry.expires_at = None;
                 return true;
@@ -164,106 +152,67 @@ impl Store {
         false
     }
 
-    #[inline]
-    pub fn remove_if_empty(&self, key: &str) {
+    #[inline(always)]
+    pub fn remove_if_empty(&mut self, key: &str) {
         if let Some(entry) = self.data.get(key) {
-            if entry.value.collection_len() == 0 {
-                drop(entry);
+            if entry.value.is_empty() {
                 self.data.remove(key);
             }
         }
     }
 
-    // --- Accessors that work with DashMap refs ---
-
-    /// Execute a closure with read access to an entry. Returns None if key doesn't exist.
-    #[inline]
-    pub fn with_entry<F, R>(&self, key: &str, f: F) -> Option<R>
-    where F: FnOnce(&Entry) -> R {
-        self.check_expired(key);
-        self.data.get(key).map(|r| f(r.value()))
-    }
-
-    /// Execute a closure with mutable access to an entry. Returns None if key doesn't exist.
-    #[inline]
-    pub fn with_entry_mut<F, R>(&self, key: &str, f: F) -> Option<R>
-    where F: FnOnce(&mut Entry) -> R {
-        self.check_expired(key);
-        self.data.get_mut(key).map(|mut r| f(r.value_mut()))
-    }
-
-    /// Get or create a list, then execute closure on it.
-    pub fn with_list<F, R>(&self, key: &str, f: F) -> Result<R, &'static str>
-    where F: FnOnce(&mut VecDeque<Bytes>) -> R {
+    pub fn get_or_create_list(&mut self, key: &str) -> Result<&mut VecDeque<Bytes>, &'static str> {
         self.check_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(
-                key.into(),
-                Entry { value: Value::List(VecDeque::new()), expires_at: None },
-            );
+            self.data.insert(key.to_string(), Entry { value: Value::List(VecDeque::new()), expires_at: None });
         }
-        let mut entry = self.data.get_mut(key).unwrap();
-        match &mut entry.value {
-            Value::List(d) => Ok(f(d)),
+        match &mut self.data.get_mut(key).unwrap().value {
+            Value::List(d) => Ok(d),
             _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
         }
     }
 
-    /// Get or create a hash, then execute closure on it.
-    pub fn with_hash<F, R>(&self, key: &str, f: F) -> Result<R, &'static str>
-    where F: FnOnce(&mut HashMap<Box<str>, Bytes>) -> R {
+    pub fn get_or_create_hash(&mut self, key: &str) -> Result<&mut HashMap<Box<str>, Bytes>, &'static str> {
         self.check_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(
-                key.into(),
-                Entry { value: Value::Hash(HashMap::new()), expires_at: None },
-            );
+            self.data.insert(key.to_string(), Entry { value: Value::Hash(HashMap::new()), expires_at: None });
         }
-        let mut entry = self.data.get_mut(key).unwrap();
-        match &mut entry.value {
-            Value::Hash(h) => Ok(f(h)),
+        match &mut self.data.get_mut(key).unwrap().value {
+            Value::Hash(h) => Ok(h),
             _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
         }
     }
 
-    /// Get or create a set, then execute closure on it.
-    pub fn with_set<F, R>(&self, key: &str, f: F) -> Result<R, &'static str>
-    where F: FnOnce(&mut HashSet<Box<str>>) -> R {
+    pub fn get_or_create_set(&mut self, key: &str) -> Result<&mut HashSet<Box<str>>, &'static str> {
         self.check_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(
-                key.into(),
-                Entry { value: Value::Set(HashSet::new()), expires_at: None },
-            );
+            self.data.insert(key.to_string(), Entry { value: Value::Set(HashSet::new()), expires_at: None });
         }
-        let mut entry = self.data.get_mut(key).unwrap();
-        match &mut entry.value {
-            Value::Set(s) => Ok(f(s)),
+        match &mut self.data.get_mut(key).unwrap().value {
+            Value::Set(s) => Ok(s),
             _ => Err("WRONGTYPE Operation against a key holding the wrong kind of value"),
         }
     }
 
-    /// Rename: remove old key, insert under new key.
-    pub fn rename(&self, old: &str, new_key: Box<str>) -> Option<()> {
+    pub fn rename(&mut self, old: &str, new_key: String) -> bool {
         self.check_expired(old);
-        let (_, entry) = self.data.remove(old)?;
-        self.data.insert(new_key, entry);
-        Some(())
+        if let Some(entry) = self.data.remove(old) {
+            self.data.insert(new_key, entry);
+            true
+        } else { false }
     }
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    glob_inner(&p, &t)
+    glob_inner(pattern.as_bytes(), text.as_bytes())
 }
 
-fn glob_inner(p: &[char], t: &[char]) -> bool {
+fn glob_inner(p: &[u8], t: &[u8]) -> bool {
     match (p.first(), t.first()) {
         (None, None) => true,
-        (Some('*'), _) => glob_inner(&p[1..], t) || (!t.is_empty() && glob_inner(p, &t[1..])),
-        (Some('?'), Some(_)) => glob_inner(&p[1..], &t[1..]),
-        (Some(pc), Some(tc)) if *pc == *tc => glob_inner(&p[1..], &t[1..]),
+        (Some(b'*'), _) => glob_inner(&p[1..], t) || (!t.is_empty() && glob_inner(p, &t[1..])),
+        (Some(b'?'), Some(_)) => glob_inner(&p[1..], &t[1..]),
+        (Some(a), Some(b)) if a == b => glob_inner(&p[1..], &t[1..]),
         _ => false,
     }
 }

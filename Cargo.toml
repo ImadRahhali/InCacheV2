@@ -1,6 +1,6 @@
 [package]
 name = "incache_v2"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
@@ -10,11 +10,12 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
-dashmap = "6"
 itoa = "1"
 memchr = "2"
+mimalloc = { version = "0.1", features = ["override"] }
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
+target-cpu = "native"

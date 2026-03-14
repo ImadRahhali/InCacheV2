@@ -8,9 +8,8 @@ use bytes::Bytes;
 use crate::protocol::RespValue;
 use crate::store::Store;
 
-/// Dispatch a command. cmd_name is raw bytes from the client (not yet uppercased).
-pub fn dispatch(store: &Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
-    // Uppercase in-place on stack for short commands (max ~8 bytes)
+#[inline(always)]
+pub fn dispatch(store: &mut Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
     let mut upper = [0u8; 16];
     let len = cmd_name.len().min(16);
     upper[..len].copy_from_slice(&cmd_name[..len]);
@@ -18,7 +17,14 @@ pub fn dispatch(store: &Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
     let name = &upper[..len];
 
     match name {
+        b"SET" => strings::cmd_set(store, args),
+        b"GET" => strings::cmd_get(store, args),
         b"PING" => server::cmd_ping(args),
+        b"INCR" => strings::cmd_incr(store, args),
+        b"LPUSH" => lists::cmd_lpush(store, args),
+        b"HSET" => hashes::cmd_hset(store, args),
+        b"DEL" => strings::cmd_del(store, args),
+
         b"ECHO" => server::cmd_echo(args),
         b"HELLO" => server::cmd_hello(args),
         b"FLUSHALL" | b"FLUSHDB" => server::cmd_flush(store),
@@ -28,14 +34,10 @@ pub fn dispatch(store: &Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
         b"COMMAND" => server::cmd_command(args),
         b"CLIENT" => RespValue::ok(),
 
-        b"SET" => strings::cmd_set(store, args),
-        b"GET" => strings::cmd_get(store, args),
         b"GETSET" => strings::cmd_getset(store, args),
         b"MSET" => strings::cmd_mset(store, args),
         b"MGET" => strings::cmd_mget(store, args),
-        b"DEL" => strings::cmd_del(store, args),
         b"EXISTS" => strings::cmd_exists(store, args),
-        b"INCR" => strings::cmd_incr(store, args),
         b"INCRBY" => strings::cmd_incrby(store, args),
         b"DECR" => strings::cmd_decr(store, args),
         b"DECRBY" => strings::cmd_decrby(store, args),
@@ -50,7 +52,6 @@ pub fn dispatch(store: &Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
         b"RENAME" => strings::cmd_rename(store, args),
         b"KEYS" => strings::cmd_keys(store, args),
 
-        b"LPUSH" => lists::cmd_lpush(store, args),
         b"RPUSH" => lists::cmd_rpush(store, args),
         b"LPOP" => lists::cmd_lpop(store, args),
         b"RPOP" => lists::cmd_rpop(store, args),
@@ -61,7 +62,6 @@ pub fn dispatch(store: &Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
         b"LINSERT" => lists::cmd_linsert(store, args),
         b"LREM" => lists::cmd_lrem(store, args),
 
-        b"HSET" => hashes::cmd_hset(store, args),
         b"HGET" => hashes::cmd_hget(store, args),
         b"HMSET" => hashes::cmd_hmset(store, args),
         b"HMGET" => hashes::cmd_hmget(store, args),
@@ -85,8 +85,8 @@ pub fn dispatch(store: &Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
         b"SPOP" => sets::cmd_spop(store, args),
 
         _ => {
-            let name_str = String::from_utf8_lossy(cmd_name);
-            RespValue::error(format!("ERR unknown command '{}'", name_str.to_lowercase()))
+            let s = String::from_utf8_lossy(cmd_name);
+            RespValue::error(format!("ERR unknown command '{}'", s.to_lowercase()))
         }
     }
 }

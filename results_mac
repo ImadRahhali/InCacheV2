@@ -1,0 +1,56 @@
+rahhalii@14147d979521 InCache % pkill -f "port 6399" 2>/dev/null; sleep 0.5
+cd ~/InCacheV2 && ./target/release/incache_v2 --port 6399 &
+sleep 1
+echo "=== InCacheV2 Rust - Mac ==="
+valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10 2>&1 | grep "throughput"
+valkey-benchmark -p 6399 -t lrange -n 10000 -c 10 2>&1 | grep "throughput"
+pkill -f incache_v2; sleep 0.5
+[1] 97386
+=== InCacheV2 Rust - Mac ===
+  throughput summary: 74460.16 requests per second
+  throughput summary: 78802.20 requests per second
+  throughput summary: 78554.59 requests per second
+  throughput summary: 72621.64 requests per second
+  throughput summary: 71890.73 requests per second
+  throughput summary: 75187.97 requests per second
+  throughput summary: 57803.47 requests per second
+  throughput summary: 40000.00 requests per second
+  throughput summary: 33333.33 requests per second
+  throughput summary: 28735.63 requests per second
+[1]  + terminated  ./target/release/incache_v2 --port 6399
+rahhalii@14147d979521 InCacheV2 % cd ~/InCache && python -m incache --port 6399 &
+sleep 1
+echo "=== InCache Python - Mac ==="
+valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10 2>&1 | grep "throughput"
+valkey-benchmark -p 6399 -t lrange -n 10000 -c 10 2>&1 | grep "throughput"
+pkill -f "python -m incache"; sleep 0.5
+[1] 97429
+=== InCache Python - Mac ===
+  throughput summary: 55463.12 requests per second
+  throughput summary: 58343.06 requests per second
+  throughput summary: 59523.81 requests per second
+  throughput summary: 53850.30 requests per second
+  throughput summary: 56179.78 requests per second
+  throughput summary: 59523.81 requests per second
+  throughput summary: 24330.90 requests per second
+  throughput summary: 12106.54 requests per second
+  throughput summary: 8467.40 requests per second
+  throughput summary: 7434.94 requests per second
+[1]  + terminated  python -m incache --port 6399
+
+rahhalii@14147d979521 InCache % echo "=== Redis 7.2.7 - Mac ==="
+~/redis-7.2.7/src/redis-server --port 6399 --save "" --appendonly no --daemonize yes
+sleep 1
+valkey-benchmark -p 6399 -t set,get,incr,lpush,hset -n 100000 -c 10 2>&1 | grep "throughput"
+valkey-benchmark -p 6399 -t lrange -n 10000 -c 10 2>&1 | grep "throughput"
+~/redis-7.2.7/src/redis-cli -p 6399 shutdown
+=== Redis 7.2.7 - Mac ===
+  throughput summary: 5335.90 requests per second
+  throughput summary: 5771.67 requests per second
+  throughput summary: 4163.54 requests per second
+  throughput summary: 3510.25 requests per second
+  throughput summary: 2285.19 requests per second
+  throughput summary: 4399.47 requests per second
+  throughput summary: 2503.13 requests per second
+  throughput summary: 3677.82 requests per second
+  throughput summary: 4861.45 requests per second
