@@ -22,5 +22,12 @@ fn main() {
         }
     }
 
-    server::run_server(&host, port);
+    // Single-threaded runtime — no locking needed, like Redis
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, server::run_server(&host, port));
 }
