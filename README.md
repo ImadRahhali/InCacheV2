@@ -266,7 +266,6 @@ InCacheV2 is a learning project built to understand Redis internals. It is **not
 
 **Single-threaded only** — InCacheV2 uses one CPU core. Redis 6+ offloads I/O to background threads while keeping command execution single-threaded. For workloads that saturate a single core, there's no way to scale up without running multiple instances.
 
-For production workloads, use [Redis](https://redis.io) or [Valkey](https://valkey.io).
 
 ---
 
