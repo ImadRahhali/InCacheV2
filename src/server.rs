@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut, Buf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::time::{interval, Duration};
 
-use crate::protocol::{encode_into, parse_all};
+use crate::protocol::{encode_into, parse_commands};
 use crate::store::Store;
 use crate::commands::dispatch;
 
@@ -14,7 +14,6 @@ type SharedStore = Rc<RefCell<Store>>;
 pub async fn run_server(host: &str, port: u16) {
     let store: SharedStore = Rc::new(RefCell::new(Store::new()));
 
-    // Expiry sweep — runs on the same single thread
     let sweep_store = store.clone();
     tokio::task::spawn_local(async move {
         let mut tick = interval(Duration::from_millis(100));
@@ -48,18 +47,23 @@ async fn handle_client(socket: tokio::net::TcpStream, store: SharedStore) {
             Ok(_) => {}
         }
 
-        let commands = parse_all(&mut buf);
+        let (commands, consumed) = parse_commands(&buf);
         if commands.is_empty() { continue; }
+
+        // Hold a reference to buf as a slice for arg lookups
+        let buf_slice: &[u8] = &buf;
 
         resp_buf.clear();
         {
             let mut s = store.borrow_mut();
-            for cmd_parts in &commands {
-                if cmd_parts.is_empty() { continue; }
-                let result = dispatch(&mut s, &cmd_parts[0], &cmd_parts[1..]);
+            for cmd in &commands {
+                if cmd.argc() == 0 { continue; }
+                let result = dispatch(&mut s, cmd, buf_slice);
                 encode_into(&result, &mut resp_buf);
             }
         }
+
+        buf.advance(consumed);
 
         if !resp_buf.is_empty() {
             if writer.write_all(&resp_buf).await.is_err() { break; }

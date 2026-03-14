@@ -1,5 +1,7 @@
 /// In-memory data store — single-threaded, zero locking (like Redis).
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashSet as HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 
@@ -54,7 +56,7 @@ pub struct Store {
 
 impl Store {
     pub fn new() -> Self {
-        Store { data: HashMap::with_capacity(1024) }
+        Store { data: HashMap::default() }
     }
 
     pub fn sweep_expired(&mut self) {
@@ -175,7 +177,7 @@ impl Store {
     pub fn get_or_create_hash(&mut self, key: &str) -> Result<&mut HashMap<Box<str>, Bytes>, &'static str> {
         self.check_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(key.to_string(), Entry { value: Value::Hash(HashMap::new()), expires_at: None });
+            self.data.insert(key.to_string(), Entry { value: Value::Hash(HashMap::default()), expires_at: None });
         }
         match &mut self.data.get_mut(key).unwrap().value {
             Value::Hash(h) => Ok(h),
@@ -186,7 +188,7 @@ impl Store {
     pub fn get_or_create_set(&mut self, key: &str) -> Result<&mut HashSet<Box<str>>, &'static str> {
         self.check_expired(key);
         if !self.data.contains_key(key) {
-            self.data.insert(key.to_string(), Entry { value: Value::Set(HashSet::new()), expires_at: None });
+            self.data.insert(key.to_string(), Entry { value: Value::Set(HashSet::default()), expires_at: None });
         }
         match &mut self.data.get_mut(key).unwrap().value {
             Value::Set(s) => Ok(s),

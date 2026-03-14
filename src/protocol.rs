@@ -1,5 +1,5 @@
-/// RESP2 protocol parser and serialiser.
-use bytes::{Buf, Bytes, BytesMut, BufMut};
+/// RESP2 protocol parser and serialiser — zero-allocation hot path.
+use bytes::{Bytes, BytesMut, BufMut};
 
 #[derive(Debug, Clone)]
 pub enum RespValue {
@@ -12,101 +12,139 @@ pub enum RespValue {
 }
 
 impl RespValue {
-    #[inline]
+    #[inline(always)]
     pub fn ok() -> Self { RespValue::SimpleString(Bytes::from_static(b"OK")) }
-    #[inline]
+    #[inline(always)]
     pub fn pong() -> Self { RespValue::SimpleString(Bytes::from_static(b"PONG")) }
-    #[inline]
-    pub fn simple(s: &'static str) -> Self { RespValue::SimpleString(Bytes::from_static(s.as_bytes())) }
-    #[inline]
+    #[inline(always)]
     pub fn error(s: String) -> Self { RespValue::Error(Bytes::from(s)) }
-    #[inline]
+    #[inline(always)]
     pub fn wrongtype() -> Self {
         RespValue::Error(Bytes::from_static(b"WRONGTYPE Operation against a key holding the wrong kind of value"))
     }
-    #[inline]
+    #[inline(always)]
     pub fn bulk(b: Bytes) -> Self { RespValue::BulkString(b) }
-    #[inline]
+    #[inline(always)]
     pub fn bulk_from(b: &[u8]) -> Self { RespValue::BulkString(Bytes::copy_from_slice(b)) }
-    #[inline]
+    #[inline(always)]
     pub fn simple_from_str(s: &str) -> Self { RespValue::SimpleString(Bytes::copy_from_slice(s.as_bytes())) }
 }
 
-/// Try to parse one complete RESP value from buf.
-pub fn parse_one(buf: &[u8]) -> Option<(RespValue, usize)> {
-    if buf.is_empty() { return None; }
+/// A parsed command: up to 8 args on the stack, spills to heap for more.
+/// Each arg is a (start, len) range into the read buffer.
+const INLINE_ARGS: usize = 8;
 
-    match buf[0] {
-        b'+' | b'-' | b':' | b'$' | b'*' => {}
-        _ => {
-            // Inline command
-            let idx = find_crlf(buf)?;
-            let line = std::str::from_utf8(&buf[..idx]).ok()?;
-            let parts: Vec<RespValue> = line.split_whitespace()
-                .map(|s| RespValue::BulkString(Bytes::copy_from_slice(s.as_bytes())))
-                .collect();
-            return Some((RespValue::Array(parts), idx + 2));
+pub struct Command {
+    ranges: [(u32, u32); INLINE_ARGS],
+    extra: Vec<(u32, u32)>,
+    count: usize,
+}
+
+impl Command {
+    #[inline(always)]
+    fn new() -> Self {
+        Command {
+            ranges: [(0, 0); INLINE_ARGS],
+            extra: Vec::new(),
+            count: 0,
         }
     }
 
-    let idx = find_crlf(buf)?;
-    let line = &buf[1..idx];
+    #[inline(always)]
+    fn push(&mut self, start: usize, len: usize) {
+        if self.count < INLINE_ARGS {
+            self.ranges[self.count] = (start as u32, len as u32);
+        } else {
+            self.extra.push((start as u32, len as u32));
+        }
+        self.count += 1;
+    }
 
-    match buf[0] {
-        b'+' => Some((RespValue::SimpleString(Bytes::copy_from_slice(line)), idx + 2)),
-        b'-' => Some((RespValue::Error(Bytes::copy_from_slice(line)), idx + 2)),
-        b':' => {
-            let n: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
-            Some((RespValue::Integer(n), idx + 2))
-        }
-        b'$' => {
-            let len: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
-            if len == -1 { return Some((RespValue::Null, idx + 2)); }
-            let len = len as usize;
-            let end = idx + 2 + len + 2;
-            if buf.len() < end { return None; }
-            Some((RespValue::BulkString(Bytes::copy_from_slice(&buf[idx + 2..idx + 2 + len])), end))
-        }
-        b'*' => {
-            let count: i64 = std::str::from_utf8(line).ok()?.parse().ok()?;
-            if count == -1 { return Some((RespValue::Null, idx + 2)); }
-            let count = count as usize;
-            let mut pos = idx + 2;
-            let mut items = Vec::with_capacity(count);
-            for _ in 0..count {
-                let (item, consumed) = parse_one(&buf[pos..])?;
-                items.push(item);
-                pos += consumed;
-            }
-            Some((RespValue::Array(items), pos))
-        }
-        _ => None,
+    #[inline(always)]
+    pub fn argc(&self) -> usize { self.count }
+
+    #[inline(always)]
+    pub fn arg<'a>(&self, idx: usize, buf: &'a [u8]) -> &'a [u8] {
+        let (start, len) = if idx < INLINE_ARGS {
+            self.ranges[idx]
+        } else {
+            self.extra[idx - INLINE_ARGS]
+        };
+        &buf[start as usize..start as usize + len as usize]
     }
 }
 
-/// Parse all complete commands from buffer.
-pub fn parse_all(buf: &mut BytesMut) -> Vec<Vec<Bytes>> {
+/// Parse all complete commands from buffer. Returns commands + total bytes consumed.
+/// Commands reference positions in `buf` — caller must not modify buf until done.
+pub fn parse_commands(buf: &[u8]) -> (Vec<Command>, usize) {
     let mut commands = Vec::new();
-    loop {
-        match parse_one(buf) {
-            Some((RespValue::Array(items), consumed)) => {
-                let cmd: Vec<Bytes> = items.into_iter().map(|v| match v {
-                    RespValue::BulkString(b) => b,
-                    RespValue::SimpleString(s) => s,
-                    RespValue::Integer(n) => Bytes::from(n.to_string()),
-                    _ => Bytes::new(),
-                }).collect();
-                buf.advance(consumed);
+    let mut pos = 0;
+
+    while pos < buf.len() {
+        match buf[pos] {
+            b'*' => {
+                // RESP array
+                let Some(crlf) = find_crlf(&buf[pos..]) else { break };
+                let count = parse_int(&buf[pos + 1..pos + crlf]);
+                if count < 0 { pos += crlf + 2; continue; }
+                let count = count as usize;
+                let mut cmd = Command::new();
+                let mut p = pos + crlf + 2;
+                let mut ok = true;
+                for _ in 0..count {
+                    if p >= buf.len() || buf[p] != b'$' { ok = false; break; }
+                    let Some(crlf2) = find_crlf(&buf[p..]) else { ok = false; break };
+                    let len = parse_int(&buf[p + 1..p + crlf2]) as usize;
+                    let data_start = p + crlf2 + 2;
+                    let data_end = data_start + len + 2;
+                    if data_end > buf.len() { ok = false; break; }
+                    cmd.push(data_start, len);
+                    p = data_end;
+                }
+                if !ok { break; }
                 commands.push(cmd);
+                pos = p;
             }
-            _ => break,
+            b'+' | b'-' | b':' | b'$' => {
+                // Single value — skip (shouldn't happen in client commands)
+                let Some(crlf) = find_crlf(&buf[pos..]) else { break };
+                pos += crlf + 2;
+            }
+            _ => {
+                // Inline command
+                let Some(crlf) = find_crlf(&buf[pos..]) else { break };
+                let line = &buf[pos..pos + crlf];
+                let mut cmd = Command::new();
+                let mut i = 0;
+                while i < line.len() {
+                    while i < line.len() && line[i] == b' ' { i += 1; }
+                    if i >= line.len() { break; }
+                    let start = pos + i;
+                    while i < line.len() && line[i] != b' ' { i += 1; }
+                    cmd.push(start, pos + i - start);
+                }
+                if cmd.argc() > 0 { commands.push(cmd); }
+                pos += crlf + 2;
+            }
         }
     }
-    commands
+
+    (commands, pos)
+}
+
+#[inline(always)]
+fn parse_int(buf: &[u8]) -> i64 {
+    let mut neg = false;
+    let mut n: i64 = 0;
+    for &b in buf {
+        if b == b'-' { neg = true; }
+        else if b >= b'0' && b <= b'9' { n = n * 10 + (b - b'0') as i64; }
+    }
+    if neg { -n } else { n }
 }
 
 /// Encode a RespValue directly into a BytesMut buffer.
-#[inline]
+#[inline(always)]
 pub fn encode_into(value: &RespValue, out: &mut BytesMut) {
     match value {
         RespValue::SimpleString(s) => {
@@ -145,7 +183,7 @@ pub fn encode_into(value: &RespValue, out: &mut BytesMut) {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn find_crlf(buf: &[u8]) -> Option<usize> {
     memchr::memchr(b'\r', buf).filter(|&i| i + 1 < buf.len() && buf[i + 1] == b'\n')
 }

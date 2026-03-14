@@ -1,25 +1,25 @@
 use bytes::Bytes;
-use std::collections::HashSet;
-use crate::protocol::RespValue;
+use rustc_hash::FxHashSet as HashSet;
+use crate::protocol::{Command, RespValue};
 use crate::store::{Store, Value};
 
 #[inline(always)]
-fn to_str(b: &Bytes) -> &str { unsafe { std::str::from_utf8_unchecked(b) } }
+fn arg_str<'a>(cmd: &Command, i: usize, buf: &'a [u8]) -> &'a str { unsafe { std::str::from_utf8_unchecked(cmd.arg(i, buf)) } }
 
-pub fn cmd_sadd(store: &mut Store, args: &[Bytes]) -> RespValue {
-    let key = to_str(&args[0]);
+pub fn cmd_sadd(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    let key = arg_str(cmd, 1, buf);
     match store.get_or_create_set(key) {
         Err(e) => RespValue::error(e.into()),
         Ok(s) => {
             let mut added = 0i64;
-            for a in &args[1..] { if s.insert(to_str(a).into()) { added += 1; } }
+            for i in 2..cmd.argc() { if s.insert(arg_str(cmd, i, buf).into()) { added += 1; } }
             RespValue::Integer(added)
         }
     }
 }
 
-pub fn cmd_smembers(store: &mut Store, args: &[Bytes]) -> RespValue {
-    match store.get_entry(to_str(&args[0])) {
+pub fn cmd_smembers(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    match store.get_entry(arg_str(cmd, 1, buf)) {
         None => RespValue::Array(vec![]),
         Some(e) => match &e.value {
             Value::Set(s) => RespValue::Array(s.iter().map(|v| RespValue::bulk_from(v.as_bytes())).collect()),
@@ -28,12 +28,12 @@ pub fn cmd_smembers(store: &mut Store, args: &[Bytes]) -> RespValue {
     }
 }
 
-pub fn cmd_srem(store: &mut Store, args: &[Bytes]) -> RespValue {
-    let key = to_str(&args[0]);
+pub fn cmd_srem(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    let key = arg_str(cmd, 1, buf);
     let c = match store.get_entry_mut(key) {
         None => return RespValue::Integer(0),
         Some(e) => match &mut e.value {
-            Value::Set(s) => { let mut c = 0i64; for a in &args[1..] { if s.remove(to_str(a)) { c += 1; } } c }
+            Value::Set(s) => { let mut c = 0i64; for i in 2..cmd.argc() { if s.remove(arg_str(cmd, i, buf)) { c += 1; } } c }
             _ => return RespValue::wrongtype(),
         },
     };
@@ -41,18 +41,18 @@ pub fn cmd_srem(store: &mut Store, args: &[Bytes]) -> RespValue {
     RespValue::Integer(c)
 }
 
-pub fn cmd_sismember(store: &mut Store, args: &[Bytes]) -> RespValue {
-    match store.get_entry(to_str(&args[0])) {
+pub fn cmd_sismember(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    match store.get_entry(arg_str(cmd, 1, buf)) {
         None => RespValue::Integer(0),
         Some(e) => match &e.value {
-            Value::Set(s) => RespValue::Integer(if s.contains(to_str(&args[1])) { 1 } else { 0 }),
+            Value::Set(s) => RespValue::Integer(if s.contains(arg_str(cmd, 2, buf)) { 1 } else { 0 }),
             _ => RespValue::wrongtype(),
         },
     }
 }
 
-pub fn cmd_scard(store: &mut Store, args: &[Bytes]) -> RespValue {
-    match store.get_entry(to_str(&args[0])) {
+pub fn cmd_scard(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    match store.get_entry(arg_str(cmd, 1, buf)) {
         None => RespValue::Integer(0),
         Some(e) => match &e.value { Value::Set(s) => RespValue::Integer(s.len() as i64), _ => RespValue::wrongtype() },
     }
@@ -60,8 +60,8 @@ pub fn cmd_scard(store: &mut Store, args: &[Bytes]) -> RespValue {
 
 fn get_members(store: &mut Store, key: &str) -> HashSet<Box<str>> {
     match store.get_entry(key) {
-        None => HashSet::new(),
-        Some(e) => match &e.value { Value::Set(s) => s.clone(), _ => HashSet::new() },
+        None => HashSet::default(),
+        Some(e) => match &e.value { Value::Set(s) => s.clone(), _ => HashSet::default() },
     }
 }
 
@@ -69,40 +69,37 @@ fn set_resp(s: HashSet<Box<str>>) -> RespValue {
     RespValue::Array(s.into_iter().map(|v| RespValue::BulkString(Bytes::from(String::from(v)))).collect())
 }
 
-pub fn cmd_sunion(store: &mut Store, args: &[Bytes]) -> RespValue {
-    let mut r = HashSet::new();
-    for a in args { r.extend(get_members(store, to_str(a))); }
+pub fn cmd_sunion(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    let mut r = HashSet::default();
+    for i in 1..cmd.argc() { r.extend(get_members(store, arg_str(cmd, i, buf))); }
     set_resp(r)
 }
 
-pub fn cmd_sinter(store: &mut Store, args: &[Bytes]) -> RespValue {
+pub fn cmd_sinter(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
     let mut r: Option<HashSet<Box<str>>> = None;
-    for a in args {
-        let m = get_members(store, to_str(a));
+    for i in 1..cmd.argc() {
+        let m = get_members(store, arg_str(cmd, i, buf));
         r = Some(match r { None => m, Some(r) => r.intersection(&m).cloned().collect() });
     }
     set_resp(r.unwrap_or_default())
 }
 
-pub fn cmd_sdiff(store: &mut Store, args: &[Bytes]) -> RespValue {
+pub fn cmd_sdiff(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
     let mut r: Option<HashSet<Box<str>>> = None;
-    for a in args {
-        let m = get_members(store, to_str(a));
+    for i in 1..cmd.argc() {
+        let m = get_members(store, arg_str(cmd, i, buf));
         r = Some(match r { None => m, Some(r) => r.difference(&m).cloned().collect() });
     }
     set_resp(r.unwrap_or_default())
 }
 
-pub fn cmd_smove(store: &mut Store, args: &[Bytes]) -> RespValue {
-    let src = to_str(&args[0]);
-    let dst = to_str(&args[1]);
-    let member: Box<str> = to_str(&args[2]).into();
+pub fn cmd_smove(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    let src = arg_str(cmd, 1, buf);
+    let dst = arg_str(cmd, 2, buf);
+    let member: Box<str> = arg_str(cmd, 3, buf).into();
     let removed = match store.get_entry_mut(src) {
         None => return RespValue::Integer(0),
-        Some(e) => match &mut e.value {
-            Value::Set(s) => s.remove(&*member),
-            _ => return RespValue::wrongtype(),
-        },
+        Some(e) => match &mut e.value { Value::Set(s) => s.remove(&*member), _ => return RespValue::wrongtype() },
     };
     if !removed { return RespValue::Integer(0); }
     store.remove_if_empty(src);
@@ -112,8 +109,8 @@ pub fn cmd_smove(store: &mut Store, args: &[Bytes]) -> RespValue {
     }
 }
 
-pub fn cmd_spop(store: &mut Store, args: &[Bytes]) -> RespValue {
-    let key = to_str(&args[0]);
+pub fn cmd_spop(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    let key = arg_str(cmd, 1, buf);
     let val = match store.get_entry_mut(key) {
         None => return RespValue::Null,
         Some(e) => match &mut e.value {

@@ -4,88 +4,89 @@ pub mod hashes;
 pub mod sets;
 pub mod server;
 
-use bytes::Bytes;
-use crate::protocol::RespValue;
+use crate::protocol::{Command, RespValue};
 use crate::store::Store;
 
+/// Dispatch a command. Args are slices into the read buffer.
 #[inline(always)]
-pub fn dispatch(store: &mut Store, cmd_name: &Bytes, args: &[Bytes]) -> RespValue {
+pub fn dispatch(store: &mut Store, cmd: &Command, buf: &[u8]) -> RespValue {
+    let name_raw = cmd.arg(0, buf);
     let mut upper = [0u8; 16];
-    let len = cmd_name.len().min(16);
-    upper[..len].copy_from_slice(&cmd_name[..len]);
+    let len = name_raw.len().min(16);
+    upper[..len].copy_from_slice(&name_raw[..len]);
     upper[..len].make_ascii_uppercase();
     let name = &upper[..len];
 
     match name {
-        b"SET" => strings::cmd_set(store, args),
-        b"GET" => strings::cmd_get(store, args),
-        b"PING" => server::cmd_ping(args),
-        b"INCR" => strings::cmd_incr(store, args),
-        b"LPUSH" => lists::cmd_lpush(store, args),
-        b"HSET" => hashes::cmd_hset(store, args),
-        b"DEL" => strings::cmd_del(store, args),
+        b"SET" => strings::cmd_set(store, cmd, buf),
+        b"GET" => strings::cmd_get(store, cmd, buf),
+        b"PING" => server::cmd_ping(cmd, buf),
+        b"INCR" => strings::cmd_incr(store, cmd, buf),
+        b"LPUSH" => lists::cmd_lpush(store, cmd, buf),
+        b"HSET" => hashes::cmd_hset(store, cmd, buf),
+        b"DEL" => strings::cmd_del(store, cmd, buf),
 
-        b"ECHO" => server::cmd_echo(args),
-        b"HELLO" => server::cmd_hello(args),
-        b"FLUSHALL" | b"FLUSHDB" => server::cmd_flush(store),
-        b"DBSIZE" => server::cmd_dbsize(store),
+        b"ECHO" => server::cmd_echo(cmd, buf),
+        b"HELLO" => server::cmd_hello(),
+        b"FLUSHALL" | b"FLUSHDB" => { store.flush(); RespValue::ok() }
+        b"DBSIZE" => RespValue::Integer(store.dbsize() as i64),
         b"INFO" => server::cmd_info(),
-        b"SELECT" => server::cmd_select(args),
-        b"COMMAND" => server::cmd_command(args),
+        b"SELECT" => server::cmd_select(cmd, buf),
+        b"COMMAND" => server::cmd_command(cmd, buf),
         b"CLIENT" => RespValue::ok(),
 
-        b"GETSET" => strings::cmd_getset(store, args),
-        b"MSET" => strings::cmd_mset(store, args),
-        b"MGET" => strings::cmd_mget(store, args),
-        b"EXISTS" => strings::cmd_exists(store, args),
-        b"INCRBY" => strings::cmd_incrby(store, args),
-        b"DECR" => strings::cmd_decr(store, args),
-        b"DECRBY" => strings::cmd_decrby(store, args),
-        b"APPEND" => strings::cmd_append(store, args),
-        b"STRLEN" => strings::cmd_strlen(store, args),
-        b"SETNX" => strings::cmd_setnx(store, args),
-        b"SETEX" => strings::cmd_setex(store, args),
-        b"EXPIRE" => strings::cmd_expire(store, args),
-        b"TTL" => strings::cmd_ttl(store, args),
-        b"PERSIST" => strings::cmd_persist(store, args),
-        b"TYPE" => strings::cmd_type(store, args),
-        b"RENAME" => strings::cmd_rename(store, args),
-        b"KEYS" => strings::cmd_keys(store, args),
+        b"GETSET" => strings::cmd_getset(store, cmd, buf),
+        b"MSET" => strings::cmd_mset(store, cmd, buf),
+        b"MGET" => strings::cmd_mget(store, cmd, buf),
+        b"EXISTS" => strings::cmd_exists(store, cmd, buf),
+        b"INCRBY" => strings::cmd_incrby(store, cmd, buf),
+        b"DECR" => strings::cmd_decr(store, cmd, buf),
+        b"DECRBY" => strings::cmd_decrby(store, cmd, buf),
+        b"APPEND" => strings::cmd_append(store, cmd, buf),
+        b"STRLEN" => strings::cmd_strlen(store, cmd, buf),
+        b"SETNX" => strings::cmd_setnx(store, cmd, buf),
+        b"SETEX" => strings::cmd_setex(store, cmd, buf),
+        b"EXPIRE" => strings::cmd_expire(store, cmd, buf),
+        b"TTL" => strings::cmd_ttl(store, cmd, buf),
+        b"PERSIST" => strings::cmd_persist(store, cmd, buf),
+        b"TYPE" => strings::cmd_type(store, cmd, buf),
+        b"RENAME" => strings::cmd_rename(store, cmd, buf),
+        b"KEYS" => strings::cmd_keys(store, cmd, buf),
 
-        b"RPUSH" => lists::cmd_rpush(store, args),
-        b"LPOP" => lists::cmd_lpop(store, args),
-        b"RPOP" => lists::cmd_rpop(store, args),
-        b"LRANGE" => lists::cmd_lrange(store, args),
-        b"LLEN" => lists::cmd_llen(store, args),
-        b"LINDEX" => lists::cmd_lindex(store, args),
-        b"LSET" => lists::cmd_lset(store, args),
-        b"LINSERT" => lists::cmd_linsert(store, args),
-        b"LREM" => lists::cmd_lrem(store, args),
+        b"RPUSH" => lists::cmd_rpush(store, cmd, buf),
+        b"LPOP" => lists::cmd_lpop(store, cmd, buf),
+        b"RPOP" => lists::cmd_rpop(store, cmd, buf),
+        b"LRANGE" => lists::cmd_lrange(store, cmd, buf),
+        b"LLEN" => lists::cmd_llen(store, cmd, buf),
+        b"LINDEX" => lists::cmd_lindex(store, cmd, buf),
+        b"LSET" => lists::cmd_lset(store, cmd, buf),
+        b"LINSERT" => lists::cmd_linsert(store, cmd, buf),
+        b"LREM" => lists::cmd_lrem(store, cmd, buf),
 
-        b"HGET" => hashes::cmd_hget(store, args),
-        b"HMSET" => hashes::cmd_hmset(store, args),
-        b"HMGET" => hashes::cmd_hmget(store, args),
-        b"HGETALL" => hashes::cmd_hgetall(store, args),
-        b"HDEL" => hashes::cmd_hdel(store, args),
-        b"HEXISTS" => hashes::cmd_hexists(store, args),
-        b"HLEN" => hashes::cmd_hlen(store, args),
-        b"HKEYS" => hashes::cmd_hkeys(store, args),
-        b"HVALS" => hashes::cmd_hvals(store, args),
-        b"HINCRBY" => hashes::cmd_hincrby(store, args),
+        b"HGET" => hashes::cmd_hget(store, cmd, buf),
+        b"HMSET" => hashes::cmd_hmset(store, cmd, buf),
+        b"HMGET" => hashes::cmd_hmget(store, cmd, buf),
+        b"HGETALL" => hashes::cmd_hgetall(store, cmd, buf),
+        b"HDEL" => hashes::cmd_hdel(store, cmd, buf),
+        b"HEXISTS" => hashes::cmd_hexists(store, cmd, buf),
+        b"HLEN" => hashes::cmd_hlen(store, cmd, buf),
+        b"HKEYS" => hashes::cmd_hkeys(store, cmd, buf),
+        b"HVALS" => hashes::cmd_hvals(store, cmd, buf),
+        b"HINCRBY" => hashes::cmd_hincrby(store, cmd, buf),
 
-        b"SADD" => sets::cmd_sadd(store, args),
-        b"SMEMBERS" => sets::cmd_smembers(store, args),
-        b"SREM" => sets::cmd_srem(store, args),
-        b"SISMEMBER" => sets::cmd_sismember(store, args),
-        b"SCARD" => sets::cmd_scard(store, args),
-        b"SUNION" => sets::cmd_sunion(store, args),
-        b"SINTER" => sets::cmd_sinter(store, args),
-        b"SDIFF" => sets::cmd_sdiff(store, args),
-        b"SMOVE" => sets::cmd_smove(store, args),
-        b"SPOP" => sets::cmd_spop(store, args),
+        b"SADD" => sets::cmd_sadd(store, cmd, buf),
+        b"SMEMBERS" => sets::cmd_smembers(store, cmd, buf),
+        b"SREM" => sets::cmd_srem(store, cmd, buf),
+        b"SISMEMBER" => sets::cmd_sismember(store, cmd, buf),
+        b"SCARD" => sets::cmd_scard(store, cmd, buf),
+        b"SUNION" => sets::cmd_sunion(store, cmd, buf),
+        b"SINTER" => sets::cmd_sinter(store, cmd, buf),
+        b"SDIFF" => sets::cmd_sdiff(store, cmd, buf),
+        b"SMOVE" => sets::cmd_smove(store, cmd, buf),
+        b"SPOP" => sets::cmd_spop(store, cmd, buf),
 
         _ => {
-            let s = String::from_utf8_lossy(cmd_name);
+            let s = String::from_utf8_lossy(name_raw);
             RespValue::error(format!("ERR unknown command '{}'", s.to_lowercase()))
         }
     }
