@@ -288,11 +288,12 @@ This project started with a simple idea: use an existing project's own test suit
 
 **The Python prototype ([InCache](https://github.com/ImadRahhali/InCache))** came first. Pure Python, asyncio, ~800 lines. It hit ~36k ops/sec on Linux — respectable for an interpreted language, but roughly 2.5× slower than Redis. The test suite was the real output: 149 tests that validate RESP2 protocol behaviour through a real `redis-py` client. Any server that passes them is Redis-compatible.
 
+The entire thing — both repos, all benchmarks, this README — was built in a single afternoon, with AI-assisted development (Kiro CLI + claude-ops-4.6-1m).
+
 **The Rust rewrite (InCacheV2)** reused the exact same test suite. Same 149 tests, same `redis-py` client, different binary behind port 6399. The first working version passed all tests immediately. Then came the performance work: single-threaded Tokio → raw epoll loop, `HashMap` → `FxHashMap`, `Vec<Bytes>` per command → zero-alloc stack-based parser, mimalloc, TCP_NODELAY. Each change was benchmarked on the same Linux box against Redis 7.2.7.
 
 The result: **+32% over Redis on pipelined workloads, 95-98% on single commands, 100% match on LRANGE.** Then AUTH, MULTI/EXEC, and SLOWLOG were added to close the feature gap. 175 tests total.
 
-The entire thing — both repos, all benchmarks, this README — was built in a single afternoon, with AI-assisted development (Kiro CLI). The human provided the architecture decisions, the AI wrote the code, and the test suite kept both honest.
 
 **The takeaway:** a Redis-compatible server that beats Redis on pipelining isn't magic. Redis is optimised for generality — persistence, replication, Lua, pub/sub, sorted sets, streams. InCacheV2 is optimised for exactly one thing: serving GET/SET as fast as possible with zero overhead. When you strip away everything Redis does that we don't, the remaining gap is ~3% — and that's just `sds` strings vs `Bytes::copy_from_slice`.
 
