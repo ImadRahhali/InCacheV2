@@ -20,6 +20,22 @@ r.hset("user:1", mapping={"name": "Imad", "role": "engineer"})
 
 ---
 
+## How this was built
+
+This project idea came after seeing the [vinext methodology](https://blog.cloudflare.com/vinext): write the test suite first as the spec, then make it pass using AI Generated Code.
+
+**[InCache](https://github.com/ImadRahhali/InCache) (Python)** came first — ~800 lines of asyncio, hitting ~36k ops/sec on Linux. The real output was 149 pytest tests validating Redis command behaviour over a real `redis-py` client. Any server that passes them is Redis-compatible.
+
+**InCacheV2 (Rust)** reused the exact same 149 tests. The first version passed them immediately. Then came the performance work: Tokio → raw epoll, `HashMap` → `FxHashMap`, `Vec<Bytes>` per command → zero-alloc stack parser, mimalloc, TCP_NODELAY. Each change benchmarked against Redis 7.2.7 on the same machine.
+
+Result: **+32% over Redis on pipelined workloads, 95–98% on single commands, 100% parity on LRANGE.** AUTH, MULTI/EXEC, and SLOWLOG brought the total to 175 tests.
+
+The entire project — both repos, all benchmarks — was built in one afternoon with AI-assisted development (Kiro CLI + claude-opus-4.6-1m).
+
+**The takeaway:** Redis is optimised for generality — persistence, replication, Lua, pub/sub, sorted sets. InCacheV2 does one thing: serve GET/SET as fast as possible. When you strip away everything Redis does that we don't, the remaining gap is ~3% — and that's just `sds` vs `Bytes::copy_from_slice`. But in a real word production this work showcase that Redis is not replacable in few hours even with using the latest LLMs.
+
+---
+
 ## Benchmarks
 
 Linux · Intel Xeon Platinum 8175M · `redis-benchmark` from Redis 7.2.7 · same machine, same conditions.
@@ -162,21 +178,7 @@ InCacheV2 is a learning project — not production-ready. Key gaps:
 
 For production, use [Redis](https://redis.io) or [Valkey](https://valkey.io).
 
----
 
-## How this was built
-
-This project used the [vinext methodology](https://blog.cloudflare.com/vinext): write the test suite first as the spec, then make it pass.
-
-**[InCache](https://github.com/ImadRahhali/InCache) (Python)** came first — ~800 lines of asyncio, hitting ~36k ops/sec on Linux. The real output was 149 pytest tests validating Redis command behaviour over a real `redis-py` client. Any server that passes them is Redis-compatible.
-
-**InCacheV2 (Rust)** reused the exact same 149 tests. The first version passed them immediately. Then came the performance work: Tokio → raw epoll, `HashMap` → `FxHashMap`, `Vec<Bytes>` per command → zero-alloc stack parser, mimalloc, TCP_NODELAY. Each change benchmarked against Redis 7.2.7 on the same machine.
-
-Result: **+32% over Redis on pipelined workloads, 95–98% on single commands, 100% parity on LRANGE.** AUTH, MULTI/EXEC, and SLOWLOG brought the total to 175 tests.
-
-The entire project — both repos, all benchmarks — was built with AI-assisted development (Kiro CLI + claude-opus-4).
-
-**The takeaway:** Redis is optimised for generality — persistence, replication, Lua, pub/sub, sorted sets. InCacheV2 does one thing: serve GET/SET as fast as possible. When you strip away everything Redis does that we don't, the remaining gap is ~3% — and that's just `sds` vs `Bytes::copy_from_slice`.
 
 ---
 
