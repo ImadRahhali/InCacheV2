@@ -31,8 +31,8 @@ All benchmarks using `redis-benchmark` (from Redis 7.2.7), on **Linux** (Intel X
 
 | Test | InCacheV2 | Redis 7.2.7 | Result |
 |---|---|---|---|
-| **Pipeline 16 — SET** | **1,075,269** | 900,901 | **InCacheV2 +19%** |
-| **Pipeline 16 — GET** | **1,075,269** | 1,000,000 | **InCacheV2 +8%** |
+| **Pipeline 16 — SET** | **1,176,471** | 892,857 | **InCacheV2 +32%** |
+| **Pipeline 16 — GET** | **1,176,471** | 1,000,000 | **InCacheV2 +18%** |
 
 This is the most realistic benchmark. Production Redis clients (Jedis, Lettuce, redis-py) pipeline commands by default. InCacheV2's zero-alloc batch parser + buffered writes amortize per-command overhead across 16 commands per round-trip.
 
@@ -40,13 +40,13 @@ This is the most realistic benchmark. Production Redis clients (Jedis, Lettuce, 
 
 | Command | InCacheV2 | Redis 7.2.7 | Ratio |
 |---------|-----------|-------------|-------|
-| SET     | 80,192    | 88,106      | 91%   |
-| GET     | 80,257    | 86,580      | 93%   |
-| INCR    | 80,515    | 86,730      | 93%   |
-| LPUSH   | 81,699    | 87,566      | 93%   |
-| HSET    | 81,037    | 87,413      | 93%   |
+| SET     | 83,264    | 85,034      | 98%   |
+| GET     | 84,818    | 87,489      | 97%   |
+| INCR    | 84,388    | 87,566      | 96%   |
+| LPUSH   | 81,103    | 87,566      | 93%   |
+| HSET    | 83,264    | 87,260      | 95%   |
 
-The ~7% gap on single commands is the cost of Tokio's async runtime vs Redis's bare `epoll` event loop. Each command pays ~1μs of future-polling overhead that Redis doesn't have.
+The ~3% gap on single commands is the cost of `Bytes::copy_from_slice` when storing values vs Redis's zero-copy `sds` strings.
 
 ### LRANGE — identical throughput
 
@@ -138,9 +138,9 @@ redis-benchmark -p 6399 -t set,get -n 100000 -c 10 -d 4096
 
 ```
 src/
-├── main.rs              # CLI entrypoint — single-threaded Tokio runtime + mimalloc
-├── server.rs            # TCP server — Rc<RefCell<Store>>, spawn_local
-│                        #   TCP_NODELAY, 64KB BufWriter
+├── main.rs              # CLI entrypoint — mimalloc global allocator
+├── server.rs            # Raw epoll/kqueue event loop — no async runtime
+│                        #   TCP_NODELAY, direct read→parse→execute→write
 ├── protocol.rs          # RESP2 zero-alloc parser + serialiser
 │                        #   Commands parsed as (offset, len) into read buffer
 │                        #   memchr SIMD for \r\n scanning, itoa for integers
@@ -159,8 +159,9 @@ src/
 
 | | Redis (C) | InCacheV2 (Rust) |
 |---|---|---|
-| Threading | Single-threaded `ae.c` event loop | Single-threaded Tokio `current_thread` |
-| Locking | None | None — `Rc<RefCell<Store>>` |
+| Threading | Single-threaded `ae.c` event loop | Single-threaded raw `epoll`/`kqueue` loop |
+| Locking | None | None |
+| Async runtime | None — bare event loop | None — bare event loop |
 | Allocator | jemalloc | mimalloc |
 | Hash function | SipHash-like | FxHash (non-cryptographic) |
 | String storage | `sds` (embedded length) | `bytes::Bytes` (ref-counted) |
@@ -197,7 +198,7 @@ cargo build --release
 ./target/release/incache_v2 --port 6380         # custom port
 ```
 
-Dependencies: `tokio` · `bytes` · `itoa` · `memchr` · `mimalloc` · `rustc-hash`
+Dependencies: `bytes` · `itoa` · `memchr` · `mimalloc` · `rustc-hash` · `libc`
 
 ---
 
