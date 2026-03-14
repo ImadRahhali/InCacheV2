@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-use bytes::BytesMut;
+use bytes::{BytesMut, BufMut};
 
 use crate::commands::dispatch;
 use crate::protocol::{encode_into, parse_commands};
@@ -171,18 +171,21 @@ pub fn run_server(host: &str, port: u16) {
 
 #[inline(always)]
 fn handle(conn: &mut Conn, store: &mut Store) -> bool {
-    // Read all available data — no intermediate copy
-    let mut tmp = [0u8; 65536];
+    // Read directly into BytesMut spare capacity — zero intermediate copy
     loop {
-        match conn.stream.read(&mut tmp) {
+        if conn.read_buf.capacity() - conn.read_buf.len() < 4096 {
+            conn.read_buf.reserve(32768);
+        }
+        let chunk = conn.read_buf.chunk_mut();
+        let slice = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut u8, chunk.len()) };
+        match conn.stream.read(slice) {
             Ok(0) => return true,
-            Ok(n) => conn.read_buf.extend_from_slice(&tmp[..n]),
+            Ok(n) => unsafe { conn.read_buf.advance_mut(n); },
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(_) => return true,
         }
     }
 
-    // Parse + execute
     let (commands, consumed) = parse_commands(&conn.read_buf);
     if commands.is_empty() { return false; }
 
@@ -194,17 +197,14 @@ fn handle(conn: &mut Conn, store: &mut Store) -> bool {
         encode_into(&result, &mut conn.write_buf);
     }
 
-    // Advance read buffer past consumed bytes
     let _ = conn.read_buf.split_to(consumed);
 
-    // Write response — tight loop, no async
     if !conn.write_buf.is_empty() {
         let mut pos = 0;
         while pos < conn.write_buf.len() {
             match conn.stream.write(&conn.write_buf[pos..]) {
                 Ok(n) => pos += n,
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Spin briefly for loopback — socket buffer almost never full
                     std::hint::spin_loop();
                     continue;
                 }
